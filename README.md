@@ -220,6 +220,7 @@ src/
 │   ├── gantt.ts                #   甘特图纯布局 + 改期纯函数
 │   ├── calendar-window.ts      #   日历数据窗口（月视图按整周网格 + 两端 7 天余量）
 │   ├── calendar-shape.ts       #   ★ 课/考试/任务的形状口径 + 月历圆点的顺序与截断
+│   ├── widget-days.ts          #   ★ 小组件周/月卡的分天分桶（形状口径复用 calendar-shape）
 │   ├── month-plan.ts           #   ★ 月历下拉清单：这个月每天有什么（只列本月、每天截 3 件）
 │   ├── review.ts               #   ★「回」的全部口径
 │   ├── past-event.ts           #   ★ 过去没打勾的事：挪一下 / 改成待办 / 拿掉
@@ -251,9 +252,10 @@ src/
 │
 ├── entry/                      # 【入口层】所有记录入口最终都汇到这里
 │   ├── quick-capture.ts        #   记 → 分 → 落 的唯一实现
-│   ├── notifications.ts        #   有时间才排提醒，失败不影响记录
+│   ├── notifications.ts        #   有时间才排提醒，失败不影响记录（含通知动作按钮 / 每日提醒）
+│   ├── notification-response.ts #  通知按钮点按 → 完成 / 稍后（反向接线，避免循环依赖）
 │   ├── scrape-timetable.ts     #   ★ 注入教务页面执行的抓取脚本（按屏幕横坐标归位到星期）
-│   └── overlay.ts              #   悬浮球（Android 独立版专属能力，见第八节）
+│   └── overlay.ts              #   悬浮球 + 通知栏入口（Android 独立版专属能力，见第八节）
 │
 ├── state/                      # 客户端状态
 │   ├── app-store.ts            #   inbox / today / ideas / 生长秒数 / dataVersion
@@ -1103,17 +1105,71 @@ metro.config.js                 # wasm 资源解析 + COOP/COEP 头（expo-sqlit
   "必须打包 dev build"那一档 —— 见第五节约定 14。首次打包时最可能出问题的地方依次是：
   前台服务类型声明、`startForeground` 的 API 34 分支、深链是否被正确解析。
 
+### 通知栏入口（2026-10-11 新增，与悬浮球并存一轮）
+
+指令要求「悬浮球改成通知栏里一颗常驻通知，点一下弹快速记录、不打断当前 App」。
+做法（同一 `modules/overlay/` 原生模块里）：
+
+- **`NotificationEntry.kt`**：一条 `setOngoing(true)` 的常驻通知（渠道 `capture-entry`，
+  `IMPORTANCE_LOW`，`NOTIFICATION_ID=4202`）。⭐ **不用前台服务** —— 常驻通知由系统代管，
+  进程被杀通知仍在，重启后由 JS（`restoreNotifyEntryIfEnabled`）恢复。
+  设置里的开关语义不变，"开/关"变成"发/撤这条通知"。
+- **`CaptureDialogActivity.kt`**：`Theme.Translucent.NoTitleBar` 的透明 Activity，
+  在当前 App 上面直接弹一个原生输入框 —— 当前应用不被切走，这就是"不打断"。
+  代码手写 UI（无 `res/layout`）；`EditText` 单行 + 软键盘「完成」提交。
+  提交拼 `aischedule://capture?text=<urlencoded>&auto=1` 深链进主进程
+  （唯一落库口 `quickCapture` 不动），Dialog 关掉。
+- ⭐ **语音不做**：系统 `SpeechRecognizer` 依赖 Google 服务，Mate 70 Pro（鸿蒙）上没有，
+  鸿蒙自己的识别没有公开 SDK 通道 → 只做打字。
+- **JS 面**：`src/entry/overlay.ts` 的 `getNotifyEntrySupport` / `enableNotifyEntry` /
+  `disableNotifyEntry` / `restoreNotifyEntryIfEnabled`；`settings-store.notifyEntryEnabled`
+  记"用户想不想要"；`capture-input.tsx` 的 `initialText` / `autoSubmit` 承接深链参数。
+- **并存的理由**：上一轮悬浮球刚炸过一次（MATCH_PARENT 全屏挡触摸），
+  **没有回退方案的替换不划算** → 设置页「快速入口」卡两个开关并存，真机验过再删旧的。
+
+### 通知动作按钮与每日提醒（2026-10-11 新增）
+
+- **动作按钮**（`TASK_CATEGORY`）：通知上挂「完成 / 稍后 15 分 / 稍后 1 小时」。
+  两处排任务通知（`scheduleTaskReminder` / `syncRepeatingTaskReminders`）都挂
+  `categoryIdentifier`。**处理放在 `src/entry/notification-response.ts`**
+  （`registerReminderActions`，`_layout` 顶层调用）—— 不写在 `notifications.ts` 里，
+  因为 `app-store` 依赖 `notifications.ts`，反向再 import store 会成循环依赖。
+- **每日提醒**：`syncDailyReminder`（`SchedulableTriggerInputTypes.DAILY`，默认 8:00），
+  内容是静态的（expo 排的是死内容）。动态内容（"今天有 3 件事"）需原生每日 receiver，后补。
+- ⚠️ **已知边界：App 被杀后通知按钮无效**（JS 收不到 response 事件）→ 需原生 receiver 兜底。
+- **未做**：铃声渠道（按优先级三档）、FSI 全屏弹窗、持续 5 分钟提醒、覆盖勿扰
+  —— 都是原生 + 真机依赖重的一批，方案见 `docs/入口层方案-2026-10-11.md` §4。
+
+### 桌面小组件（2026-10-11 扩到 5 个）
+
+Android 走 `react-native-android-widget`（注意比常见包名多一个 s）。
+本批从「今天 / 下一节课」两个只读组件扩到五个：
+
+- **Today / NextClass / Week / Month / Habit**（`src/widget/widgets.tsx`）。
+- **分天分桶纯函数** `src/domain/widget-days.ts`（`collectWidgetDays`）：周/月卡按天分桶，
+  形状语言与日历页 `dayShapes` 同一套（课空心 → 考试方块 → 任务圆，未完成深/已完成浅）。
+  **刻意不含纪念日**（`dayShapes` 没有纪念日形状）。
+- **Habit 是第一个"能写"的组件**：点一下当天打卡（`TOGGLE_HABIT_ACTION` → `toggleHabitToday`
+  → refresh → 重写快照）。
+- **快照机制**：`expo-file-system` 写 `widget-snapshot.json`，widget handler **读文件不读 DB**
+  （launcher 进程不保证 sqlite 已初始化）；`registerWidgetTaskHandler` 必须模块顶层注册。
+- **实时预览**：`widgetPreview(name, snap)` 在设置页渲染同一组件喂同一份快照，同真机数据。
+- ⚠️ 小组件的 receiver / `appwidget-provider` XML 由 config plugin 在 **`expo prebuild`** 时注入
+  → 改了 `app.json` 的 plugins 后**必须重跑 prebuild**，否则组件不出现在桌面上。
+- 小组件样式限制：`ColorProp` 只接受 `#${string}`（**不接受 `'transparent'`**）；
+  TextWidget 用 `maxLines`/`truncate` 不是 `numberOfLines`；**不支持 `opacity`/`maxWidth`**。
+
 **下一步（按优先级）**：
 
-1. **入口层剩下的三项**：语音 / 截图 OCR / 系统分享（悬浮球已写，见第七节，等打包验证）。
-2. **提醒的可靠性**：重复提醒（习惯型按 `repeat` 排期）、到点后的沉淀。
+1. **入口层剩下的**：语音 / 截图 OCR / 系统分享 / FSI 弹窗 / 覆盖勿扰（见方案 §4、§9）。
+2. **提醒的可靠性**：通知按钮被杀后的原生兜底 receiver；重复提醒（习惯型按 `repeat` 排期）。
 3. **链（模板 / 工作流）**：完成 A 自动生成 B 的触发器。
 4. **能力层接真实模型**：把 `capabilities/client.ts` 里的 `performRemoteCall()` 换成真实请求；
    上线「理解」「语义检索」两项先行。
 5. **想法库的语义检索**：库本身已经完整（记录 / 归档箱 / **拆解成任务**，见第六节），
    剩下的是"用一句话把以前记过的东西捞回来"（能力层）。
 6. **小东西的动效与白噪音**：目前是静态圆形，按生长量缩放。
-7. **桌面小组件**：日程组件 + 多种日历视图 + 专注组件。
+7. **小组件继续扩**：专注组件、动态内容的每日提醒 receiver。
 
 ## 九、已知限制
 

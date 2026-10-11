@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, TextInput, View } from 'react-native';
 
 import { understandText } from '@/capabilities/client';
@@ -76,6 +76,14 @@ export interface CaptureInputProps {
   containers?: Container[];
   /** 时间面板顶部的快捷预设（如"今天 18:00"）。不传就只有手选 */
   timePresets?: readonly DateTimePreset[];
+  /** 初值：通知栏弹窗深链进来时把原文带过来（app/capture 的 ?text= 参数） */
+  initialText?: string;
+  /**
+   * 挂载后直接提交一次初值（通知栏入口的 ?auto=1）：
+   * 用户在弹窗里已经按过「记下来」，这一页只负责落库和给个回执，
+   * 再让他按一遍「记下」等于把同一个动作问两次。
+   */
+  autoSubmit?: boolean;
   onSubmit: (text: string, options: CaptureOptions) => void | Promise<void>;
 }
 
@@ -89,10 +97,12 @@ export function CaptureInput({
   ideaOnly = false,
   containers,
   timePresets,
+  initialText,
+  autoSubmit = false,
   onSubmit,
 }: CaptureInputProps) {
   const theme = useTheme();
-  const [text, setText] = useState('');
+  const [text, setText] = useState(initialText ?? '');
   /** 用户在记录页自己勾的「这是灵感」；想法页不用它（那边 ideaOnly 恒真） */
   const [ideaToggled, setIdeaToggled] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -157,6 +167,21 @@ export function CaptureInput({
     reminder === null ? '不提醒' : reminderValue == null ? '提醒' : describeReminder(reminderValue);
 
   const canSubmit = text.trim().length > 0 && !busy;
+
+  /*
+   * 自动提交只认初值、只发一次：deep link 冷启动可能重渲染几次，
+   * 没有闸的话同一条内容会被记好几遍。初值为空（用户在弹窗里啥都没写
+   * 就提交了？不会发生，但万一）就不自动提交，让页面当普通记录页用。
+   */
+  const autoFired = useRef(false);
+  useEffect(() => {
+    if (!autoSubmit || autoFired.current) return;
+    if (!(initialText ?? '').trim()) return;
+    autoFired.current = true;
+    void submit();
+    // 只在挂载时执行一次：提交读的就是初值那一版闭包
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const reset = () => {
     setText('');

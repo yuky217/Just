@@ -22,7 +22,7 @@
         "android.permission.SCHEDULE_EXACT_ALARM"
       ],
       "predictiveBackGestureEnabled": false,
-      "versionCode": 2
+      "versionCode": 3
     },
     "web": {
       "output": "static",
@@ -65,6 +65,39 @@
               "targetCellWidth": 4,
               "targetCellHeight": 2,
               "resizeMode": "horizontal",
+              "updatePeriodMillis": 1800000
+            },
+            {
+              "name": "Week",
+              "label": "JUST · 这一周",
+              "description": "一周七天，每天有什么（月历同款圆点）",
+              "minWidth": "320dp",
+              "minHeight": "140dp",
+              "targetCellWidth": 4,
+              "targetCellHeight": 2,
+              "resizeMode": "both",
+              "updatePeriodMillis": 1800000
+            },
+            {
+              "name": "Month",
+              "label": "JUST · 月历",
+              "description": "整月网格和每天的圆点",
+              "minWidth": "320dp",
+              "minHeight": "240dp",
+              "targetCellWidth": 4,
+              "targetCellHeight": 4,
+              "resizeMode": "both",
+              "updatePeriodMillis": 1800000
+            },
+            {
+              "name": "Habit",
+              "label": "JUST · 习惯打卡",
+              "description": "今天的习惯，点一下直接打卡",
+              "minWidth": "180dp",
+              "minHeight": "140dp",
+              "targetCellWidth": 2,
+              "targetCellHeight": 2,
+              "resizeMode": "both",
               "updatePeriodMillis": 1800000
             }
           ]

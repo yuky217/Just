@@ -11,12 +11,23 @@ import { Spacing } from '@/constants/theme';
 import { exportBackup } from '@/data/backup/export';
 import { restoreFromPicker } from '@/data/backup/import';
 import { SCHEMA_VERSION } from '@/data/db/schema';
-import { getReminderSupport, sendTestReminder, type ReminderSupport } from '@/entry/notifications';
-import { disableOverlay, enableOverlay, getOverlaySupport, type OverlaySupport } from '@/entry/overlay';
+import { getReminderSupport, sendTestReminder, syncDailyReminder, type ReminderSupport } from '@/entry/notifications';
+import {
+  disableNotifyEntry,
+  disableOverlay,
+  enableNotifyEntry,
+  enableOverlay,
+  getNotifyEntrySupport,
+  getOverlaySupport,
+  type NotifyEntrySupport,
+  type OverlaySupport,
+} from '@/entry/overlay';
 import { FOCUS_MINUTE_PRESETS } from '@/domain/focus';
 import { useTheme } from '@/hooks/use-theme';
 import { useAppStore } from '@/state/app-store';
 import { useSettings } from '@/state/settings-store';
+import { computeWidgetSnapshot } from '@/widget/snapshot';
+import { widgetPreview, type WidgetName } from '@/widget/widgets';
 
 /**
  * 设置页。
@@ -92,6 +103,35 @@ export default function SettingsScreen() {
     if (support.status === 'need-permission') resumeOverlayRef.current = true;
     setOverlay(await enableOverlay());
   };
+
+  // 通知栏入口：它的授权门是通知权限（不是悬浮窗那个），开启时会自己弹授权框
+  const [notifyEntry, setNotifyEntry] = useState<NotifyEntrySupport | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void getNotifyEntrySupport().then((support) => {
+      if (alive) setNotifyEntry(support);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const handleToggleNotifyEntry = async (value: boolean) => {
+    settings.setNotifyEntryEnabled(value);
+    setNotifyEntry(await (value ? enableNotifyEntry() : disableNotifyEntry()));
+  };
+
+  // 每日提醒：开关一拨就全撤重排（expo 的 daily 触发器系统管着，
+  // 这里只负责"开关状态 = 排没排"）。失败时开关回弹，不给假状态
+  const handleToggleDailyReminder = async (value: boolean) => {
+    const ok = await syncDailyReminder(value);
+    if (ok || !value) settings.setDailyReminderEnabled(value);
+  };
+
+  // 小组件实时预览：与桌面同一份组件、同一份快照数据（widget/widgetPreview）
+  const [previewName, setPreviewName] = useState<WidgetName>('Today');
+  const [previewSnap] = useState(() => computeWidgetSnapshot());
 
   const handleTestReminder = async () => {
     setTestResult(null);
@@ -285,6 +325,21 @@ export default function SettingsScreen() {
           </ThemedText>
         ) : null}
 
+        {/*
+          每日提醒：内容是静态的（"看看今天的安排"），固定每天 8:00 ——
+          动态摘要（"今天有 3 件事"）要原生 receiver 现算，后补。
+        */}
+        <Row
+          title="每日提醒"
+          hint="每天 8:00 提一句，点开看看今天的安排"
+          right={
+            <Switch
+              value={settings.dailyReminderEnabled}
+              onValueChange={handleToggleDailyReminder}
+            />
+          }
+        />
+
         {reminder?.inExpoGo ? (
           <ThemedText type="small" themeColor="textSecondary" style={styles.footnote}>
             当前跑在 Expo Go 里；试发能弹出来就说明提醒是好的。
@@ -292,9 +347,20 @@ export default function SettingsScreen() {
         ) : null}
       </Card>
 
-      {/* ---------------- 悬浮窗（只有 Android 独立版有） ---------------- */}
+      {/* ---------------- 快速入口（只有 Android 独立版有） ---------------- */}
       {Platform.OS === 'android' ? (
-        <Card title="悬浮窗" hint="一颗小球浮在所有应用之上，点一下直接进记录">
+        <Card title="快速入口" hint="两个都在试，留下顺手的那个">
+          <Row
+            title="通知栏"
+            hint={notifyEntry ? notifyEntry.message : '正在检测…'}
+            right={
+              <Switch
+                value={notifyEntry?.showing ?? false}
+                disabled={notifyEntry?.status === 'unavailable'}
+                onValueChange={handleToggleNotifyEntry}
+              />
+            }
+          />
           <Row
             title="悬浮球"
             hint={overlay ? overlay.message : '正在检测…'}
@@ -308,6 +374,36 @@ export default function SettingsScreen() {
           />
         </Card>
       ) : null}
+
+      {/* ---------------- 小组件（预览与桌面同一份代码） ---------------- */}
+      <Card title="小组件" hint="长按桌面空白处 → 小组件，拖出去就能用">
+        <View style={styles.chips}>
+          {WIDGET_PREVIEW_TABS.map((tab) => {
+            const active = previewName === tab.key;
+            return (
+              <Pressable
+                key={tab.key}
+                onPress={() => setPreviewName(tab.key)}
+                style={[
+                  styles.chip,
+                  {
+                    backgroundColor: active ? theme.text : theme.background,
+                    borderColor: active ? theme.text : theme.backgroundSelected,
+                  },
+                ]}>
+                <ThemedText
+                  type="small"
+                  style={{ color: active ? theme.background : theme.text }}>
+                  {tab.label}
+                </ThemedText>
+              </Pressable>
+            );
+          })}
+        </View>
+        <View style={styles.previewBox} pointerEvents="none">
+          {widgetPreview(previewName, previewSnap)}
+        </View>
+      </Card>
 
       {/* ---------------- 高级功能（默认关闭） ---------------- */}
       <Card
@@ -460,6 +556,15 @@ function Row({ title, hint, right }: { title: string; hint?: string; right?: Rea
   );
 }
 
+/** 预览切换的页签。键与原生注册的 widget 名一一对应（app.json plugins） */
+const WIDGET_PREVIEW_TABS: readonly { key: WidgetName; label: string }[] = [
+  { key: 'Today', label: '今天' },
+  { key: 'NextClass', label: '下一节课' },
+  { key: 'Week', label: '这一周' },
+  { key: 'Month', label: '月历' },
+  { key: 'Habit', label: '习惯' },
+];
+
 const styles = StyleSheet.create({
   block: { gap: Spacing.two },
   row: {
@@ -493,5 +598,6 @@ const styles = StyleSheet.create({
     borderRadius: Spacing.two,
     borderWidth: StyleSheet.hairlineWidth,
   },
+  previewBox: { width: '100%', overflow: 'hidden' },
   footnote: { fontSize: 12, lineHeight: 18, opacity: 0.8 },
 });

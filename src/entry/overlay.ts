@@ -1,6 +1,8 @@
 import { requireOptionalNativeModule } from 'expo-modules-core';
 import { Linking, Platform } from 'react-native';
 
+import { ensureNotificationPermission, getReminderSupport } from './notifications';
+
 /**
  * 悬浮窗 —— 入口层在 Android 上的形态（主文档的「记录无感」）。
  *
@@ -27,6 +29,10 @@ type OverlayNativeModule = {
   requestPermission: () => Promise<boolean>;
   show: () => Promise<boolean>;
   hide: () => Promise<boolean>;
+  /** 通知栏入口：那条常驻通知发出去没有 */
+  isEntryShowing: () => boolean;
+  showEntry: () => Promise<boolean>;
+  hideEntry: () => Promise<boolean>;
 };
 
 export type OverlayStatus =
@@ -170,5 +176,119 @@ export async function openCaptureDeepLink(): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+/*
+ * ---------------- 通知栏入口（2026-10-11 第二批） ----------------
+ *
+ * 与悬浮球的关系：**并存一轮**（方案 docs/入口层方案-2026-10-11.md §3）。
+ * 悬浮球是真机刚修好的形态，没有回退方案的替换不划算 —— 真机验过通知栏
+ * 方案再决定删谁。所以这里是第二组独立函数，不碰上面任何一颗函数。
+ *
+ * 与悬浮球的授权差异：通知栏入口**不需要**"显示在其他应用上层"那个授权
+ * （它不画窗口），要的是**通知权限** —— 点通知拉起的 Activity 是普通
+ * Activity，Android 10+ 的后台启动限制由"用户点了通知"这件事豁免。
+ */
+
+export type NotifyEntryStatus =
+  /** 通知权限已给，通知发得出去 */
+  | 'ready'
+  /** 差通知权限 */
+  | 'need-permission'
+  /** 这个形态下没有这个能力（网页端 / Expo Go / iOS） */
+  | 'unavailable';
+
+export interface NotifyEntrySupport {
+  status: NotifyEntryStatus;
+  /** 那条常驻通知现在在不在通知栏里 */
+  showing: boolean;
+  /** 给界面直接显示的一句话 */
+  message: string;
+}
+
+/**
+ * 探查通知栏入口的真实状态。**不弹权限框** —— 只想看状态时不该打扰用户。
+ * 通知权限借 `getReminderSupport()` 读：两边要的是同一个授权，别各问各的。
+ */
+export async function getNotifyEntrySupport(): Promise<NotifyEntrySupport> {
+  const mod = native();
+  if (!mod) {
+    return {
+      status: 'unavailable',
+      showing: false,
+      message:
+        Platform.OS === 'android'
+          ? '要装独立安装版才有；Expo Go 和网页端都缺原生模块'
+          : '通知栏入口只有 Android 有',
+    };
+  }
+  try {
+    const reminder = await getReminderSupport();
+    if (!reminder.moduleAvailable) {
+      return { status: 'unavailable', showing: false, message: '这台设备用不了本地通知' };
+    }
+    if (!reminder.granted) {
+      return {
+        status: 'need-permission',
+        showing: Boolean(mod.isEntryShowing()),
+        message: '还差一步授权：允许 JUST 发通知',
+      };
+    }
+    const showing = mod.isEntryShowing();
+    return {
+      status: 'ready',
+      showing,
+      message: showing ? '通知栏里常驻一条入口，点一下直接打字' : '现在没开',
+    };
+  } catch {
+    return { status: 'unavailable', showing: false, message: '当前环境下用不了' };
+  }
+}
+
+/**
+ * 开启。通知权限没给就先弹授权框（这是本形态唯一的授权门）；
+ * 授权了就发那条常驻通知。
+ */
+export async function enableNotifyEntry(): Promise<NotifyEntrySupport> {
+  const mod = native();
+  if (!mod) return getNotifyEntrySupport();
+  try {
+    if (await ensureNotificationPermission()) {
+      await mod.showEntry();
+    }
+  } catch {
+    // 发不出去就让 getNotifyEntrySupport 如实报告
+  }
+  return getNotifyEntrySupport();
+}
+
+export async function disableNotifyEntry(): Promise<NotifyEntrySupport> {
+  const mod = native();
+  if (mod) {
+    try {
+      await mod.hideEntry();
+    } catch {
+      // 同上
+    }
+  }
+  return getNotifyEntrySupport();
+}
+
+/**
+ * 启动时按用户上次的选择恢复通知（与 restoreOverlayIfEnabled 同一个理由：
+ * 开一次就一直在，不该因为 App 重启就得再去设置页点一次）。
+ * 手机重启 / 强制停止后系统会撤掉这条通知，下次打开 App 时它自己回来。
+ */
+export async function restoreNotifyEntryIfEnabled(enabled: boolean): Promise<void> {
+  if (!enabled) return;
+  const mod = native();
+  if (!mod) return;
+  try {
+    if (mod.isEntryShowing()) return;
+    // 权限被撤销时 show 不进去，isShowing() 会如实反映，设置页照常显示
+    if (await ensureNotificationPermission()) await mod.showEntry();
+  } catch {
+    // 恢复失败不是错误
   }
 }

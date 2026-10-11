@@ -248,6 +248,7 @@ export async function scheduleTaskReminder(task: Task): Promise<string[]> {
     registerHandler(Notifications);
     if (!(await ensureNotificationPermission())) return [];
     await ensureAndroidChannel(Notifications);
+    await ensureTaskCategory(Notifications);
 
     const ids: string[] = [];
     for (const fireAt of fires) {
@@ -259,6 +260,7 @@ export async function scheduleTaskReminder(task: Task): Promise<string[]> {
               body,
               // 同一条任务的每期都带同一个 taskId —— 全撤重排按它一把撤干净
               data: { taskId: task.id },
+              categoryIdentifier: TASK_CATEGORY,
             },
             trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: fireAt },
           }),
@@ -314,6 +316,7 @@ export async function syncRepeatingTaskReminders(
 
   if (!(await hasNotificationPermission(Notifications))) return 0;
   await ensureAndroidChannel(Notifications);
+  await ensureTaskCategory(Notifications);
 
   let count = 0;
   for (const task of repeating) {
@@ -324,6 +327,7 @@ export async function syncRepeatingTaskReminders(
             title: task.title,
             body: task.location ? `到点了 · ${task.location}` : '到点了',
             data: { taskId: task.id },
+            categoryIdentifier: TASK_CATEGORY,
           },
           trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: fireAt },
         });
@@ -522,4 +526,155 @@ export async function syncEventReminders(
     }
   }
   return count;
+}
+
+/*
+ * ---------------- 通知按钮（2026-10-11 第三批） ----------------
+ *
+ * 任务提醒的通知上挂三个动作：**完成 / 稍后15分 / 稍后1小时**。
+ * 在通知栏里就把"记下了但要迟一点"处理掉，不用切进 App。
+ *
+ * 已知边界（方案 §4 拍板过）：**App 被系统杀掉后按钮点了没反应** ——
+ * 处理按钮要走 JS（完成要过对账、稍后要重排），原生兜底 receiver 等真机
+ * 验证后再补。App 活着时（绝大多数提醒场景，因为通知是它自己排的）都有效。
+ */
+
+/** 动作按钮挂靠的分类 id。scheduleTaskReminder 的每条通知都带它 */
+export const TASK_CATEGORY = 'task-reminder';
+
+export type ReminderResponseAction = 'complete' | 'snooze15' | 'snooze60';
+
+let categoryReady = false;
+
+async function ensureTaskCategory(mod: NotificationsModule): Promise<void> {
+  if (categoryReady) return;
+  try {
+    await mod.setNotificationCategoryAsync(TASK_CATEGORY, [
+      { identifier: 'complete', buttonTitle: '完成' },
+      { identifier: 'snooze15', buttonTitle: '稍后15分' },
+      { identifier: 'snooze60', buttonTitle: '稍后1小时' },
+    ]);
+    categoryReady = true;
+  } catch {
+    // 分类注册不上只是少了按钮，提醒本身照常弹 —— 不让失败二次失败
+  }
+}
+
+/**
+ * 订阅提醒通知上的按钮动作。返回取消函数（当前场景注册一次就够，返回值备用）。
+ *
+ * 为什么要在这里而不是界面里订阅：按钮点击发生在任何页面之外，
+ * 订阅必须跟着 App 启动就走（_layout），而不是某个页面挂载时才生效。
+ * 具体动作（完成要过对账、稍后要重排）由回调方接线 —— 本文件不 import
+ * app-store，避免 entry ↔ store 的循环依赖。
+ */
+export function addReminderResponseListener(
+  handler: (taskId: string, action: ReminderResponseAction) => void,
+): () => void {
+  let subscription: { remove: () => void } | null = null;
+  void (async () => {
+    const mod = await loadNotifications();
+    if (!mod) return;
+    try {
+      subscription = mod.addNotificationResponseReceivedListener((response) => {
+        const data = response.notification.request.content.data as { taskId?: string } | undefined;
+        if (!data?.taskId) return;
+        const action = response.actionIdentifier;
+        if (action === 'complete') handler(data.taskId, 'complete');
+        else if (action === 'snooze15') handler(data.taskId, 'snooze15');
+        else if (action === 'snooze60') handler(data.taskId, 'snooze60');
+        // 其余 actionIdentifier（点通知本体等）交给系统默认行为：打开 App
+      });
+    } catch {
+      // 某些环境不支持；按钮没了但通知还在
+    }
+  })();
+  return () => subscription?.remove();
+}
+
+/** 稍后提醒：排一条 N 分钟后的一次性通知。原通知已经弹过了，这条是唯一的新提醒 */
+export async function scheduleSnoozedReminder(
+  task: Task,
+  minutes: number,
+): Promise<boolean> {
+  try {
+    const Notifications = await loadNotifications();
+    if (!Notifications) return false;
+    registerHandler(Notifications);
+    if (!(await hasNotificationPermission(Notifications))) return false;
+    await ensureAndroidChannel(Notifications);
+    await ensureTaskCategory(Notifications);
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: task.title,
+        body: `已推迟 ${minutes >= 60 ? `${minutes / 60} 小时` : `${minutes} 分钟`}`,
+        data: { taskId: task.id },
+        categoryIdentifier: TASK_CATEGORY,
+      },
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+        seconds: Math.max(60, minutes * 60),
+      },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/*
+ * ---------------- 每日提醒（2026-10-11 第三批） ----------------
+ *
+ * 固定时刻（默认 8:00）一条"看看今天的安排"。内容是**静态的**：
+ * expo 的 daily 触发器排的是死内容，"今天有 3 件事"这种动态摘要要原生
+ * receiver 现算（后补）。默认 8:00 是"刚开始收拾、还没出门"的时刻 ——
+ * 用户开这个开关，大概率是想在一天开始前扫一眼。
+ */
+
+/** 每日提醒的 data.kind 标记。全撤重排靠它认出自己的通知 */
+const DAILY_REMINDER_KIND = 'daily-reminder';
+
+export const DAILY_REMINDER_DEFAULT_HOUR = 8;
+
+/**
+ * 全撤重排每日提醒。`enabled === false` 时只撤不发（关开关的路径）。
+ * 返回是否成功（false = 当前环境不支持或没权限）。
+ */
+export async function syncDailyReminder(
+  enabled: boolean,
+  hour = DAILY_REMINDER_DEFAULT_HOUR,
+  minute = 0,
+): Promise<boolean> {
+  const Notifications = await loadNotifications();
+  if (!Notifications) return false;
+  try {
+    // 先撤旧的（按 data.kind 认自己的）—— 改开关/改时间都要，避免叠出两条
+    const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+    for (const item of scheduled) {
+      const data = item.content.data as { kind?: string } | undefined;
+      if (data?.kind === DAILY_REMINDER_KIND) {
+        await Notifications.cancelScheduledNotificationAsync(item.identifier);
+      }
+    }
+    if (!enabled) return true;
+
+    registerHandler(Notifications);
+    if (!(await ensureNotificationPermission())) return false;
+    await ensureAndroidChannel(Notifications);
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: 'JUST · 今天的安排',
+        body: '点开看看今天有什么',
+        data: { kind: DAILY_REMINDER_KIND },
+      },
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.DAILY,
+        hour,
+        minute,
+      },
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }

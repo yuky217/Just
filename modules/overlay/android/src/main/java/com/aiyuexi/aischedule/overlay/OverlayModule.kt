@@ -69,6 +69,21 @@ class OverlayModule : Module() {
       context.stopService(serviceIntent(OverlayService.ACTION_HIDE))
       true
     }.runOnQueue(Queues.MAIN)
+
+    // ---------------- 通知栏入口（2026-10-11 第二批，与悬浮球并存一轮） ----------------
+
+    Function("isEntryShowing") { NotificationEntry.isShowing(context) }
+
+    // 通知由系统代管，不需要前台服务 —— 发/撤就是 NotificationManager 的一进一出
+    AsyncFunction("showEntry") {
+      NotificationEntry.show(context)
+      true
+    }.runOnQueue(Queues.MAIN)
+
+    AsyncFunction("hideEntry") {
+      NotificationEntry.hide(context)
+      true
+    }.runOnQueue(Queues.MAIN)
   }
 
   private fun serviceIntent(action: String): Intent =

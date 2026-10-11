@@ -64,7 +64,13 @@ export default function CaptureScreen() {
   const capture = useAppStore((state) => state.capture);
   // 待办入口带 from=inbox 进来：那是一条"先记下来"的路，没有"这是灵感"的语义，
   // 手动勾选灵感是冗余的（文本里含灵感/想法本来就会由 decideRoute 进想法库）。
-  const { from } = useLocalSearchParams<{ from?: string }>();
+  // text/auto 来自通知栏弹窗的深链（原生侧 CaptureDialogActivity 拼的）：
+  // auto=1 = 拿到就提交，这一页只落库 + 给回执，不再问一遍。
+  const { from, text: presetText, auto } = useLocalSearchParams<{
+    from?: string;
+    text?: string;
+    auto?: string;
+  }>();
   const showIdeaToggle = from !== 'inbox';
 
   const [result, setResult] = useState<QuickCaptureResult | null>(null);
@@ -94,6 +100,8 @@ export default function CaptureScreen() {
         <>
           <CaptureInput
             autoFocus
+            initialText={typeof presetText === 'string' ? presetText : undefined}
+            autoSubmit={auto === '1'}
             timePresets={CAPTURE_TIME_PRESETS}
             submitLabel="记下"
             showIdeaToggle={showIdeaToggle}

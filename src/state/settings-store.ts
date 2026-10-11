@@ -38,6 +38,17 @@ export interface SettingsState {
    */
   overlayEnabled: boolean;
   /**
+   * 通知栏快速记录入口（Android 独立版）：通知栏里一条常驻通知，
+   * 点一下弹输入框。与悬浮球是两个并存的形态（悬浮球保留一轮），
+   * 所以是独立的开关、独立的用户意愿。
+   */
+  notifyEntryEnabled: boolean;
+  /**
+   * 每日提醒：固定每天 8:00 一条"看看今天的安排"。默认关 ——
+   * 默认打扰比默认安静更难挽回（与提醒默认值的口径一致）。
+   */
+  dailyReminderEnabled: boolean;
+  /**
    * 日历里要不要课表这一栏。
    *
    * 默认**开**：课表是这个 App 的一块正功能（不是"高级功能"），
@@ -66,6 +77,8 @@ export interface SettingsState {
   setDefaultFocusMinutes: (minutes: number) => void;
   setHapticsEnabled: (value: boolean) => void;
   setOverlayEnabled: (value: boolean) => void;
+  setNotifyEntryEnabled: (value: boolean) => void;
+  setDailyReminderEnabled: (value: boolean) => void;
   setTimetableEnabled: (value: boolean) => void;
   setSimpleMode: (value: boolean) => void;
   reset: () => void;
@@ -79,6 +92,8 @@ const initial = {
   defaultFocusMinutes: 25,
   hapticsEnabled: true,
   overlayEnabled: false,
+  notifyEntryEnabled: false,
+  dailyReminderEnabled: false,
   timetableEnabled: true,
   simpleMode: false,
 };
@@ -110,6 +125,10 @@ export const useSettings = create<SettingsState>()(
       setHapticsEnabled: (value) => set({ hapticsEnabled: value }),
 
       setOverlayEnabled: (value) => set({ overlayEnabled: value }),
+
+      setNotifyEntryEnabled: (value) => set({ notifyEntryEnabled: value }),
+
+      setDailyReminderEnabled: (value) => set({ dailyReminderEnabled: value }),
 
       setTimetableEnabled: (value) => set({ timetableEnabled: value }),
 

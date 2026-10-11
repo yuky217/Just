@@ -20,5 +20,20 @@
         android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
         android:value="floating capture bubble" />
     </service>
+
+    <!--
+      通知栏入口点开后的透明输入弹窗。
+      exported=false：只被本应用的通知 PendingIntent 拉起。
+      excludeFromRecents + taskAffinity=""：它不属于任何任务栈，
+      关掉就没了，不会在最近任务里留一个"JUST 的空壳"。
+    -->
+    <activity
+      android:name="com.aiyuexi.aischedule.overlay.CaptureDialogActivity"
+      android:enabled="true"
+      android:exported="false"
+      android:excludeFromRecents="true"
+      android:taskAffinity=""
+      android:theme="@android:style/Theme.Translucent.NoTitleBar"
+      android:windowSoftInputMode="adjustResize" />
   </application>
 </manifest>
