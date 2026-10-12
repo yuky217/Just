@@ -544,6 +544,92 @@ export const TASK_CATEGORY = 'task-reminder';
 
 export type ReminderResponseAction = 'complete' | 'snooze15' | 'snooze60';
 
+/**
+ * 把一次通知响应翻译成"哪条任务 + 什么动作"。
+ *
+ * 返回 `null` 的三种情形都是**刻意不处理**，不是出错：
+ * - 点的是通知本体（默认动作）—— 交给系统默认行为：打开 App；
+ * - 通知上没带 `taskId`（不是我们排的提醒，比如每日提醒那条）；
+ * - 动作 id 认不出来（以后加了按钮却没在这儿接线）。
+ *
+ * 为什么抽成纯函数：真机上按钮只有三种处境（App 在前台 / 在后台 / 已被杀），
+ * 而"翻译"这一步跟处境无关 —— 它错一次，三种处境一起错，所以单独测最划算。
+ */
+export function parseReminderResponse(
+  actionIdentifier: string,
+  data: unknown,
+): { taskId: string; action: ReminderResponseAction } | null {
+  const taskId = (data as { taskId?: string } | null | undefined)?.taskId;
+  if (!taskId) return null;
+  switch (actionIdentifier) {
+    case 'complete':
+      return { taskId, action: 'complete' };
+    case 'snooze15':
+      return { taskId, action: 'snooze15' };
+    case 'snooze60':
+      return { taskId, action: 'snooze60' };
+    default:
+      return null;
+  }
+}
+
+/** 一次"被点掉的动作"，连它自己的身份一起 —— 去重要用 */
+export interface PendingReminderResponse {
+  taskId: string;
+  action: ReminderResponseAction;
+  /**
+   * 这次点击的身份：`请求 id + 动作 id`。
+   *
+   * 同一个动作可能从两条路进来（订阅回调 / 冷启动时读到的"上一次响应"），
+   * 两条路都可能赶上这一次启动。key 用来认"这是同一次点击，别处理两遍"。
+   */
+  key: string;
+}
+
+/**
+ * 读出「上一次被点掉的通知按钮」，读完立刻清掉。
+ *
+ * ⭐ **这是"App 被杀后按钮无效"的正面解法**（2026-10-12）。链路是这样的：
+ * 点按钮 → 系统起的是广播接收器（`NotificationsService`，它在 manifest 里，
+ * 进程不在也能起）→ 交给当时的 JS 模块 `ExpoNotificationsEmitter`。
+ * 而从被杀状态冷启动时，模块的 `OnCreate`（注册监听）**早于**我们
+ * `_layout` 里的订阅 —— 事件发出去那一刻还没有人听，只剩一份"上一次的响应"
+ * 留在原生侧。不主动读，这次点击就等于丢了。
+ *
+ * 原生侧自己其实有这个意图：`ExpoHandlingDelegate` 在没有监听者时会把响应塞进
+ * `sPendingNotificationResponses` 静态队列。但那是个**内存里的静态集合** ——
+ * 只替广播起起来的那个进程活着，用户过一会儿再打开 App 时进程早没了。
+ * 所以只能靠 `getLastNotificationResponse` 这条"进程边界之外"的路。
+ *
+ * 读完必须 `clear`：它是一次性事件。留着会让下一次冷启动把同一次点击再处理一遍
+ * （`complete` 重复执行没副作用，但 `snooze` 会多排一条提醒）。
+ */
+export async function takeLastReminderResponse(): Promise<PendingReminderResponse | null> {
+  try {
+    const mod = await loadNotifications();
+    if (!mod) return null;
+    // 用同步的 `getLastNotificationResponse`（`…Async` 那两个已被官方标了 @deprecated，
+    // 只是转发到这两个同步函数）。老版本没有它就当作没有响应。
+    const last = typeof mod.getLastNotificationResponse === 'function'
+      ? mod.getLastNotificationResponse()
+      : null;
+    if (!last) return null;
+    mod.clearLastNotificationResponse?.();
+    const parsed = parseReminderResponse(
+      last.actionIdentifier,
+      last.notification.request.content.data,
+    );
+    if (!parsed) return null;
+    return {
+      ...parsed,
+      key: `${last.notification.request.identifier}|${last.actionIdentifier}`,
+    };
+  } catch {
+    // 读不到就当没有 —— 提醒本身已经弹过了，不该为它把启动流程弄挂
+    return null;
+  }
+}
+
 let categoryReady = false;
 
 async function ensureTaskCategory(mod: NotificationsModule): Promise<void> {
@@ -569,7 +655,7 @@ async function ensureTaskCategory(mod: NotificationsModule): Promise<void> {
  * app-store，避免 entry ↔ store 的循环依赖。
  */
 export function addReminderResponseListener(
-  handler: (taskId: string, action: ReminderResponseAction) => void,
+  handler: (response: PendingReminderResponse) => void,
 ): () => void {
   let subscription: { remove: () => void } | null = null;
   void (async () => {
@@ -577,13 +663,15 @@ export function addReminderResponseListener(
     if (!mod) return;
     try {
       subscription = mod.addNotificationResponseReceivedListener((response) => {
-        const data = response.notification.request.content.data as { taskId?: string } | undefined;
-        if (!data?.taskId) return;
-        const action = response.actionIdentifier;
-        if (action === 'complete') handler(data.taskId, 'complete');
-        else if (action === 'snooze15') handler(data.taskId, 'snooze15');
-        else if (action === 'snooze60') handler(data.taskId, 'snooze60');
-        // 其余 actionIdentifier（点通知本体等）交给系统默认行为：打开 App
+        const parsed = parseReminderResponse(
+          response.actionIdentifier,
+          response.notification.request.content.data,
+        );
+        if (!parsed) return;
+        handler({
+          ...parsed,
+          key: `${response.notification.request.identifier}|${response.actionIdentifier}`,
+        });
       });
     } catch {
       // 某些环境不支持；按钮没了但通知还在

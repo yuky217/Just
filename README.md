@@ -1279,7 +1279,21 @@ TS 侧已统一叫 `convertedTaskId`。
   因为 `app-store` 依赖 `notifications.ts`，反向再 import store 会成循环依赖。
 - **每日提醒**：`syncDailyReminder`（`SchedulableTriggerInputTypes.DAILY`，默认 8:00），
   内容是静态的（expo 排的是死内容）。动态内容（"今天有 3 件事"）需原生每日 receiver，后补。
-- ⚠️ **已知边界：App 被杀后通知按钮无效**（JS 收不到 response 事件）→ 需原生 receiver 兜底。
+- ⭐ **App 被杀后按钮也有效了**（2026-10-12）：原方案写的是"要原生 receiver 兜底"，
+  查完链路发现**不需要原生写库**，缺的是 JS 侧一条读取路径。
+  真实链路：点按钮 → 系统起的是 `NotificationsService`（manifest 里的广播接收器，
+  进程不在也能起）→ 交给当时的 JS 模块 `ExpoNotificationsEmitter`。而从被杀状态冷启动时，
+  模块的 `OnCreate` **早于** `_layout` 里挂订阅 —— 事件发出去那一刻还没人听，
+  只剩一份「上一次的响应」留在原生侧（`ExpoHandlingDelegate` 那个内存静态队列
+  只替广播起起来的那个进程活着，用户过一会儿再开 App 时进程早没了，指望不上）。
+  所以 `registerReminderActions` 现在**两条路都接**：订阅管"点的时候 App 还活着"，
+  冷启动 `takeLastReminderResponse()` 读一次并**立刻清掉**（一次性事件，留着会重复处理；
+  `complete` 无副作用但 `snooze` 会多排一条提醒）。两条路可能同时赶上同一次点击，
+  按 `请求 id|动作 id` 去重。
+  ⚠️ 顺带查清一件事：动作按钮的 `opensAppToForeground` **默认是 true** ——
+  点「完成」会把 App 拉到前台。"按下按钮就别打扰我"才是这类按钮的意义，
+  真要改是 `setNotificationCategoryAsync` 里显式传 `options: { opensAppToForeground: false }`，
+  本轮没动（改它要一起重验"被杀"这条链，因为拉开前台正是当前负责兜底的那条路）。
 - **未做**：铃声渠道（按优先级三档）、FSI 全屏弹窗、持续 5 分钟提醒、覆盖勿扰
   —— 都是原生 + 真机依赖重的一批，方案见 `docs/入口层方案-2026-10-11.md` §4。
 
@@ -1305,7 +1319,9 @@ Android 走 `react-native-android-widget`（注意比常见包名多一个 s）�
 **下一步（按优先级）**：
 
 1. **入口层剩下的**：语音 / 截图 OCR / 系统分享 / FSI 弹窗 / 覆盖勿扰（见方案 §4、§9）。
-2. **提醒的可靠性**：通知按钮被杀后的原生兜底 receiver；重复提醒（习惯型按 `repeat` 排期）。
+2. **提醒的可靠性**：~~通知按钮被杀后的原生兜底 receiver~~（✅ 2026-10-12 已解，
+   走的是 JS 侧冷启动读 `lastNotificationResponse`，**不需要原生写库** ——
+   见"通知动作按钮与每日提醒"节）；还剩重复提醒（习惯型按 `repeat` 排期）。
 3. **链（模板 / 工作流）**：完成 A 自动生成 B 的触发器。
 4. **能力层继续接线**：已接「理解」「拆解」。下一个候选是**排期**
    （AI 建议安排）或**归类**（自动判断进想法库还是待办）—— 两者都要先在
