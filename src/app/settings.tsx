@@ -9,7 +9,7 @@ import { Screen } from '@/components/screen';
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { exportBackup } from '@/data/backup/export';
-import { restoreFromPicker } from '@/data/backup/import';
+import { restoreFromPicker, type ImportMode } from '@/data/backup/import';
 import { SCHEMA_VERSION } from '@/data/db/schema';
 import { getReminderSupport, sendTestReminder, syncDailyReminder, type ReminderSupport } from '@/entry/notifications';
 import {
@@ -162,34 +162,60 @@ export default function SettingsScreen() {
     }
   };
 
+  /**
+   * 从备份恢复 —— **两种模式在同一个确认框里问，不给第二个入口**（2026-10-12）。
+   *
+   * `merge`（合并导入）此前只有实现、没有界面入口，等于没有。
+   * 补的时候没有加一个「合并导入」的按钮：那会让"导入"这件事在设置里占两行，
+   * 而用户此刻想的是同一件事 —— "把这份备份弄进来"。
+   * 模式是同一个问题的另一面，就该在同一个框里问完，别让他先点入口再点模式。
+   *
+   * 为什么非问不可：这两条路互相推不出来，猜错要丢数据 ——
+   * - **覆盖**：清空现在全部数据，整库换成这份备份（换手机、回到某天用这个）；
+   * - **合并**：现在的东西全留着，同 id 的用备份内容覆盖、新 id 追加（两份数据并起来）。
+   *
+   * ⚠️ 按钮顺序踩过 Android 的坑：RN 在 Android 上按数组顺序映射成
+   * 中性 / 否定 / 肯定三个按钮（`buttons[0]` 最左、`buttons[2]` 最右且高亮），
+   * 所以"取消"必须排第一而不是最后 —— 排在最后它会变成被高亮的那个。
+   */
   const handleImport = () => {
-    Alert.alert('导入备份', '导入会覆盖当前全部本地数据，确定继续吗？', [
-      { text: '取消', style: 'cancel' },
-      {
-        text: '覆盖导入',
-        style: 'destructive',
-        onPress: async () => {
-          setBusy('import');
-          setMessage(null);
-          try {
-            const summary = await restoreFromPicker('replace');
-            if (!summary) {
-              setMessage('已取消');
-            } else {
-              const total = Object.values(summary.imported).reduce((sum, n) => sum + n, 0);
-              await refresh();
-              // 库整体换血了：旧任务的已排通知还挂着、新任务的一条没排，全撤重排
-              await useAppStore.getState().resyncReminders();
-              setMessage(`导入完成，共恢复 ${total} 条记录`);
-            }
-          } catch (error) {
-            setMessage(error instanceof Error ? error.message : '导入失败');
-          } finally {
-            setBusy(null);
-          }
-        },
-      },
-    ]);
+    Alert.alert(
+      '从备份恢复',
+      '覆盖导入：清空现在的全部数据，整库换成这份备份。\n' +
+        '合并导入：现在的东西留着，同一个 id 的用备份覆盖，新 id 追加进来。\n' +
+        '两者都不能撤销。',
+      [
+        { text: '取消', style: 'cancel' },
+        { text: '合并导入', onPress: () => void runImport('merge') },
+        { text: '覆盖导入', style: 'destructive', onPress: () => void runImport('replace') },
+      ],
+    );
+  };
+
+  const runImport = async (mode: ImportMode) => {
+    setBusy('import');
+    setMessage(null);
+    try {
+      const summary = await restoreFromPicker(mode);
+      if (!summary) {
+        setMessage('已取消');
+      } else {
+        const total = Object.values(summary.imported).reduce((sum, n) => sum + n, 0);
+        await refresh();
+        // 库换代了：旧任务的已排通知还挂着、新任务的一条没排，全撤重排。
+        // 合并同样要重排 —— 覆盖进来的那条任务的提醒跟库里那条是一样的。
+        await useAppStore.getState().resyncReminders();
+        setMessage(
+          summary.mode === 'merge'
+            ? `已合并 ${total} 条记录（同 id 的用备份内容覆盖了）`
+            : `导入完成，共恢复 ${total} 条记录`,
+        );
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '导入失败');
+    } finally {
+      setBusy(null);
+    }
   };
 
   const handleWipe = () => {

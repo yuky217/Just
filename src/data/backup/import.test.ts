@@ -169,3 +169,88 @@ describe('replace 导入', () => {
     expect(checkins).toEqual([]);
   });
 });
+
+/** 造一条 tasks 行；只填建表必需的列，其余走默认值 */
+function taskBackupRow(id: string, title: string): BackupRow {
+  return {
+    id,
+    title,
+    kind: 'execution',
+    status: 'todo',
+    time_attribute: 'none',
+    completion: 'checkbox',
+    tags_json: '[]',
+    priority: 2,
+    source: 'manual',
+    progress_json: '{"accumulatedMinutes":0}',
+    created_at: '2026-10-01T00:00:00.000Z',
+    updated_at: '2026-10-01T00:00:00.000Z',
+    sync_state: 'local',
+  };
+}
+
+async function insertTask(db: TestDb, id: string, title: string): Promise<void> {
+  await db.runAsync(
+    `INSERT INTO ${TABLES.tasks} (id, title, kind, status, time_attribute, completion, tags_json, priority, source, progress_json, created_at, updated_at, sync_state)
+     VALUES (?, ?, 'execution', 'todo', 'none', 'checkbox', '[]', 2, 'manual', '{"accumulatedMinutes":0}', '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z', 'local')`,
+    [id, title],
+  );
+}
+
+/**
+ * merge 导入（2026-10-12 补）。
+ *
+ * 这条路径此前**没有测试也没有界面入口** —— 实现躺在 `import.ts` 里没人调。
+ * 它和 replace 的差别只有一句"要不要先清库"，而那句话正是会丢数据的那个决定，
+ * 所以三条不变量都要钉住：不清库、同 id 覆盖、新 id 追加。
+ */
+describe('merge 导入', () => {
+  it('⚠️ 不清库：库里已有的数据原样留着（这是它与 replace 的唯一差别）', async () => {
+    const db = (globalThis as { __testDb?: unknown }).__testDb as TestDb;
+    await insertTask(db, 'keep', '库里本来就有的');
+
+    await importBackup(
+      envelope({ [TABLES.tasks]: [taskBackupRow('added', '备份带进来的')] }),
+      'merge',
+    );
+
+    const tasks = await db.getAllAsync<{ id: string }>(
+      `SELECT id FROM ${TABLES.tasks} ORDER BY id`,
+    );
+    expect(tasks.map((r) => r.id)).toEqual(['added', 'keep']);
+  });
+
+  it('同 id 的行被备份内容覆盖（不是插成两条）', async () => {
+    const db = (globalThis as { __testDb?: unknown }).__testDb as TestDb;
+    await insertTask(db, 't1', '旧标题');
+
+    await importBackup(
+      envelope({ [TABLES.tasks]: [taskBackupRow('t1', '备份里的新标题')] }),
+      'merge',
+    );
+
+    const rows = await db.getAllAsync<{ id: string; title: string }>(
+      `SELECT id, title FROM ${TABLES.tasks}`,
+    );
+    expect(rows).toEqual([{ id: 't1', title: '备份里的新标题' }]);
+  });
+
+  it('备份没提到的表一点不动（合并只并它带来的行）', async () => {
+    const db = (globalThis as { __testDb?: unknown }).__testDb as TestDb;
+    await insertTask(db, 'mine', '我的任务');
+
+    await importBackup(envelope({}), 'merge');
+
+    const tasks = await db.getAllAsync<{ id: string }>(`SELECT id FROM ${TABLES.tasks}`);
+    expect(tasks.map((r) => r.id)).toEqual(['mine']);
+  });
+
+  it('返回的 mode 是 merge —— 页面靠它决定说"已合并"还是"已恢复"', async () => {
+    const summary = await importBackup(
+      envelope({ [TABLES.tasks]: [taskBackupRow('t1', '一件')] }),
+      'merge',
+    );
+    expect(summary.mode).toBe('merge');
+    expect(summary.imported[TABLES.tasks]).toBe(1);
+  });
+});
