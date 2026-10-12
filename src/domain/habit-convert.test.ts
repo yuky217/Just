@@ -5,7 +5,7 @@ import { buildHabitConversion, canConvertToHabit, describeCadence } from './habi
 import type { RepeatRule, Task, TaskTime } from './task';
 
 /**
- * 「转成打卡」的测试。
+ * 「转为习惯」的测试。
  *
  * 重点不是文案，而是**转换到底动了哪些字段**：
  * 多动一个（比如把时间清掉）就是偷偷毁掉用户的意图，
@@ -44,11 +44,11 @@ function makeTask(over: Partial<Task> = {}): Task {
 }
 
 describe('canConvertToHabit', () => {
-  it('想法型不给转（它待在想法库，不催办，不该变成每天要打卡的东西）', () => {
+  it('想法型不给转（它待在想法库，不催办，不该变成习惯）', () => {
     expect(canConvertToHabit(makeTask({ kind: TaskKind.Idea }))).toBe(false);
   });
 
-  it('已经是频率型打卡了，没什么可转的', () => {
+  it('已经是频率型习惯了，没什么可转的', () => {
     expect(canConvertToHabit(makeTask({ completion: CompletionRule.Frequency }))).toBe(false);
   });
 
@@ -73,7 +73,7 @@ describe('buildHabitConversion：改哪些字段', () => {
     expect(plan.patch.completion).toBe(CompletionRule.Frequency);
     expect(plan.patch.repeat).toEqual<RepeatRule>({ freq: RepeatFreq.Daily, interval: 1 });
     expect(plan.patch.targetOccurrences).toBe(1);
-    expect(plan.message).toBe('已改成打卡习惯：每天 1 次');
+    expect(plan.message).toBe('已转为习惯：每天 1 次');
   });
 
   it('每周 3 次 → 周重复 + 目标 3 次', () => {

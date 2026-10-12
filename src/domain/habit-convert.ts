@@ -2,13 +2,28 @@ import { CompletionRule, RepeatFreq, TaskKind, TaskStatus } from './enums';
 import type { RepeatRule, Task } from './task';
 
 /**
- * 「把已有任务转成打卡」。
+ * 「转为习惯」——把一条已有的任务改成习惯。
  *
- * 为什么需要它：任务和打卡**看起来像、语义上是两件事**。
+ * ## 先分清三个词，它们不是一回事
+ *
+ * - **习惯**：一件要**反复做**的事（每周跑 3 次）。它是任务的一种
+ *   （`TaskKind.Habit`），自带节奏：这期做了几次，下期重新开始。
+ * - **打卡**：记录「今天做了没有」的那个**动作**，落点是 `task_checkins` 表。
+ *   它只是一笔事实，本身不构成任何东西。
+ * - **转为习惯**：一次**操作**，把执行型 / 日程型任务改成习惯。
+ *
+ * ⭐ **打卡是手段，转为习惯是操作。不要混。**
+ * 混了就会写出「转成打卡」这种说法 —— 而用户转完之后要的是"每周跑三次"这件事，
+ * 打卡只是它之后每天要做的一个动作。界面上因此只说「转为习惯」，
+ * 「打卡」留给真正指那个动作的地方（按钮、记录、撤销今天的打卡）。
+ *
+ * ## 为什么需要这一步
+ *
+ * 任务和习惯**看起来像、语义上是两件事**：
  * - 任务是**终点型**：勾了就结束，从列表里消失。
- * - 打卡是**过程型**：每天重置，今天做过明天还得来。
+ * - 习惯是**过程型**：每天重置，今天做过明天还得来。
  *
- * 所以"转成打卡"不是换个显示方式，而是**换判定域**：
+ * 所以「转为习惯」不是换个显示方式，而是**换判定域**：
  * 从 `task.status`（一次性状态）换到打卡记录（每日事实）。
  * 转换要动的字段因此是固定的那几项：类型、完成判定、重复规则、次数目标，
  * 以及把状态拉回待办（完成与否从此由打卡记录说话）。
@@ -36,16 +51,19 @@ export interface HabitConversionPlan {
   patch: Partial<Task>;
   /** 转换后是否补一条今天的打卡记录 */
   seedCheckin: boolean;
-  /** 这次转换会抹掉什么 —— 界面必须如实说出来，不能悄悄丢 */
+  /**
+   * 转为习惯后会丢什么 —— 界面必须如实说出来，不能悄悄丢。
+   * 措辞一律「转为习惯后…」，因为这是**这一步操作**的代价，不是习惯本身的属性。
+   */
   warnings: string[];
   /** 一句确认文案 */
   message: string;
 }
 
-/** 想法型是"待在想法库、不催办"的东西，不该被转成每天要打卡的习惯 */
+/** 想法型是"待在想法库、不催办"的东西，不该被转成习惯 */
 export function canConvertToHabit(task: Pick<Task, 'kind' | 'completion'>): boolean {
   if (task.kind === TaskKind.Idea) return false;
-  // 已经是频率型打卡了，没什么可转的
+  // 已经是频率型习惯了，没什么可转的
   if (task.completion === CompletionRule.Frequency) return false;
   return true;
 }
@@ -73,10 +91,12 @@ export function buildHabitConversion(
 
   const warnings: string[] = [];
   if (task.targetMinutes != null && task.targetMinutes > 0) {
-    warnings.push(`原来的「够 ${task.targetMinutes} 分钟」目标不再生效（打卡按次数判定）`);
+    warnings.push(
+      `转为习惯后，原来的「够 ${task.targetMinutes} 分钟」目标不再生效（习惯按打卡次数判定）`,
+    );
   }
   if (task.repeat) {
-    warnings.push('原来的重复规则会被换成打卡频率');
+    warnings.push('转为习惯后，原来的重复规则会被换成习惯的频率');
   }
 
   return {
@@ -95,6 +115,6 @@ export function buildHabitConversion(
     // 不传（undefined）要按**默认开启**处理，写成 Boolean 会把默认值反过来。
     seedCheckin: input.countExistingCompletion !== false && task.status === TaskStatus.Done,
     warnings,
-    message: `已改成打卡习惯：${describeCadence(input.cadence, target)}`,
+    message: `已转为习惯：${describeCadence(input.cadence, target)}`,
   };
 }

@@ -77,7 +77,7 @@ const AUTOSAVE_DELAY_MS = 600;
 const KIND_OPTIONS: TaskKindValue[] = [TaskKind.Schedule, TaskKind.Execution, TaskKind.Habit];
 
 /**
- * "转成打卡"的预设。
+ * "转为习惯"的预设。
  *
  * 不做一个"频率 + 次数"的二级表单：这一步的核心是**换判定域**，
  * 频率是唯一需要选的东西，而常见值就那么几个。选完还能在「目标」卡里改次数。
@@ -126,7 +126,7 @@ export default function TaskDetailScreen() {
 
   const [task, setTask] = useState<Task | null>(null);
   /**
-   * 动作完成后留一句回声（"已转成打卡""已挪到明天 14:00"）——
+   * 动作完成后留一句回声（"已转为习惯""已挪到明天 14:00"）——
    * 卡片会随之消失，不留一句话用户会不确定刚才那一下有没有生效。
    */
   const [flash, setFlash] = useState<{ icon: keyof typeof Ionicons.glyphMap; message: string } | null>(
@@ -442,7 +442,7 @@ export default function TaskDetailScreen() {
   }, [task, doneToday, checkInAction, undoCheckInAction, loadTask]);
 
   /**
-   * 转成打卡习惯。
+   * 转为习惯。
    *
    * 顺序有讲究：**先改造任务，再补打卡**。
    * 如果任务原本已经完成过，补的那条打卡就是"今天做过一次" ——
@@ -1093,7 +1093,7 @@ export default function TaskDetailScreen() {
       </Card>
 
       {/*
-        低频设置（状态 / 类型 / 目标 / 归属 / 转打卡 / 删除）**常驻展开**。
+        低频设置（状态 / 类型 / 目标 / 归属 / 转习惯 / 删除）**常驻展开**。
 
         以前它们收在一个「更多设置」开关后面：多一次点击才看得见，而用户根本
         不知道里面有什么 —— 折叠把"找设置"变成了"猜设置"。现在改成常驻，
@@ -1257,13 +1257,13 @@ export default function TaskDetailScreen() {
       ) : null}
 
       {/*
-        转成打卡：任务做完就结束，习惯每天重置 —— 差别在**判定域**，
+        转为习惯：任务做完就结束，习惯每天重置 —— 差别在**判定域**，
         不是显示方式。所以这一步会同时换掉类型、重复规则、达标方式。
       */}
       {canConvertToHabit(task) ? (
         <Card
-          title="转成打卡习惯"
-          hint="打一次算一次；够目标自动达成">
+          title="转为习惯"
+          hint="按打卡次数判定；够目标自动达成">
           <View style={styles.chips}>
             {CONVERT_PRESETS.map((preset) => (
               <Chip
@@ -1277,7 +1277,7 @@ export default function TaskDetailScreen() {
           </View>
 
           <ThemedText type="small" themeColor="textSecondary" style={styles.goalHint}>
-            重复规则与达标方式会换成打卡的频率；时间、备注、归属都保留。
+            转为习惯后，重复规则与达标方式会换成习惯的频率；时间、备注、归属都保留。
             {task.targetMinutes
               ? `原来的「够 ${task.targetMinutes} 分钟」目标将不再生效。`
               : ''}
