@@ -1,7 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, TextInput, View } from 'react-native';
+import ReanimatedSwipeable, {
+  type SwipeableMethods,
+} from 'react-native-gesture-handler/ReanimatedSwipeable';
 
 import { Card } from '@/components/card';
 import { CaptureInput } from '@/components/capture-input';
@@ -34,6 +37,19 @@ import { formatMonthDay } from '@/utils/datetime';
  * 只被用来过滤，没有任何界面能看到归档过的东西）—— 那就不是"归档"，
  * 是"删掉但骗自己说还能找回来"。所以页脚有一个归档箱：能翻、能放回、也能真删。
  */
+/**
+ * 想法页的撤销凭据。
+ *
+ * 归档与删除是两件不同的事，倒回去的做法也不同，所以这里记的不是
+ * "刚才发生了什么"，而是"怎么把它退回来"：
+ * - 归档：`archived_at` 只是个标记，行一直在库里 —— 倒回去就是清掉它，
+ *   因此只需要知道是哪些 id；
+ * - 删除：走的是软删（`deleted_at`），凭据由仓储那侧交回来（见 bulk-delete）。
+ */
+type IdeaUndo =
+  | { kind: 'archive'; ids: readonly string[] }
+  | { kind: 'delete'; undo: IdeaDeleteUndo };
+
 export default function IdeasScreen() {
   const theme = useTheme();
   const router = useRouter();
@@ -45,7 +61,6 @@ export default function IdeasScreen() {
   const archiveIdea = useAppStore((state) => state.archiveIdea);
   const loadArchivedIdeas = useAppStore((state) => state.loadArchivedIdeas);
   const unarchiveIdea = useAppStore((state) => state.unarchiveIdea);
-  const removeIdea = useAppStore((state) => state.removeIdea);
   const removeIdeasAction = useAppStore((state) => state.removeIdeas);
   const undoDeleteIdeasAction = useAppStore((state) => state.undoDeleteIdeas);
   const saveIdea = useAppStore((state) => state.saveIdea);
@@ -62,7 +77,17 @@ export default function IdeasScreen() {
   */
   const [selectingIdeas, setSelectingIdeas] = useState(false);
   const [selectedIdeaIds, setSelectedIdeaIds] = useState<Set<string>>(new Set());
-  const [ideaUndoToken, setIdeaUndoToken] = useState<IdeaDeleteUndo | null>(null);
+  /**
+   * 底部那条撤销机会，归档与删除共用。
+   *
+   * 为什么能共用：两者在用户眼里是同一件事的一半 —— "东西从眼前没了"，
+   * 只是去了不同的地方（归档箱 / 真没了）。位置、交互、一句话，全都一样，
+   * 只有那句话说的事不同。所以它是一条提示、两种来源，不是两条提示。
+   *
+   * 只留一个 token：新的会把旧的顶掉。可以接受 —— 归档过的东西还能在
+   * 归档箱里找到；而删除……所以删除后那条提示用户得**现在**决定，这也对。
+   */
+  const [ideaUndo, setIdeaUndo] = useState<IdeaUndo | null>(null);
 
   /*
     标签：① 正在编辑标签的那条想法（null = 面板没开）；② 当前按哪个标签在筛。
@@ -104,13 +129,56 @@ export default function IdeasScreen() {
     if (!selectedIdeaIds.size) return;
     void removeIdeasAction([...selectedIdeaIds]).then((undo) => {
       exitSelectIdeas();
-      setIdeaUndoToken(undo);
+      setIdeaUndo({ kind: 'delete', undo });
     });
   }, [selectedIdeaIds, removeIdeasAction, exitSelectIdeas]);
-  const undoDeleteIdeas = useCallback(() => {
-    if (!ideaUndoToken) return;
-    void undoDeleteIdeasAction(ideaUndoToken).then(() => setIdeaUndoToken(null));
-  }, [ideaUndoToken, undoDeleteIdeasAction]);
+
+  /**
+   * 左滑「归档」。
+   *
+   * 归档本身是可逆的（`archived_at` 只是个标记，行还在库里），但要用户
+   * 知道"还能去归档箱找回来"才有意义 —— 所以给一条撤销，让他不必先信这句话。
+   */
+  const archiveOneIdea = useCallback(
+    (id: string) => {
+      void archiveIdea(id).then(() => setIdeaUndo({ kind: 'archive', ids: [id] }));
+    },
+    [archiveIdea],
+  );
+
+  /**
+   * 删掉一条想法（左滑的「删除」、归档箱里的「彻底删掉」都走它）。
+   * 走 `removeIdeas` 而不是仓储的 `softDelete`：只有它会**把撤销凭据交回来**。
+   * 删除必须可撤销 —— 一次手滑就是永久的事。
+   */
+  const deleteOneIdea = useCallback(
+    (id: string) => {
+      void removeIdeasAction([id]).then((undo) => setIdeaUndo({ kind: 'delete', undo }));
+    },
+    [removeIdeasAction],
+  );
+
+  const undoIdeaAction = useCallback(() => {
+    const token = ideaUndo;
+    if (!token) return;
+    setIdeaUndo(null);
+    if (token.kind === 'archive') {
+      void (async () => {
+        for (const id of token.ids) await unarchiveIdea(id);
+      })();
+    } else {
+      void undoDeleteIdeasAction(token.undo);
+    }
+  }, [ideaUndo, unarchiveIdea, undoDeleteIdeasAction]);
+
+  /** 撤销条要说几件事：归档了 N 条 / 删了 N 条 —— 数字取实际那个 */
+  const undoItemCount = ideaUndo
+    ? ideaUndo.kind === 'archive'
+      ? ideaUndo.ids.length
+      : ideaUndo.undo.ids.length
+    : 0;
+  /** 归档**不能**说成"已删"：那会让用户以为东西没了，白跑一趟归档箱 */
+  const undoMessage = ideaUndo?.kind === 'archive' ? `已归档 ${undoItemCount} 条` : undefined;
 
   /**
    * 这条想法转成的那条任务（没转过 / 那条任务已被删 → undefined）。
@@ -152,6 +220,20 @@ export default function IdeasScreen() {
     },
     [router],
   );
+
+  /**
+   * 同一时刻只让一行滑开。新的一行滑开时把上一行收回去 ——
+   * 屏幕上同时挂着两三行露着按钮，既乱又容易点错。
+   *
+   * 用一个 ref 记"当前那行的收回动作"（每个 IdeaRow 把自己的握在手里），
+   * 而不是让页面去存一组 ref：页面根本不需要知道有几行、它们是谁。
+   */
+  const closeOpenRow = useRef<(() => void) | null>(null);
+  const handleRowWillOpen = useCallback((close: () => void) => {
+    const previous = closeOpenRow.current;
+    closeOpenRow.current = close;
+    if (previous && previous !== close) previous();
+  }, []);
 
   /**
    * 归档箱：默认收起，翻的时候才拉数据。
@@ -216,10 +298,11 @@ export default function IdeasScreen() {
             </View>
           ) : null}
           <UndoBar
-            visible={ideaUndoToken !== null}
-            count={ideaUndoToken ? ideaUndoToken.ids.length : 0}
-            onUndo={undoDeleteIdeas}
-            onDismiss={() => setIdeaUndoToken(null)}
+            visible={ideaUndo !== null}
+            count={undoItemCount}
+            message={undoMessage}
+            onUndo={undoIdeaAction}
+            onDismiss={() => setIdeaUndo(null)}
           />
         </>
       }>
@@ -330,9 +413,11 @@ export default function IdeasScreen() {
               selected={selectedIdeaIds.has(idea.id)}
               onToggleSelect={toggleSelectIdea}
               onOpen={() => openIdea(idea)}
-              onArchive={(id) => void archiveIdea(id)}
+              onArchive={archiveOneIdea}
+              onDelete={deleteOneIdea}
               onTagTap={filterByTag}
               onEditTags={() => openTagEditor(idea)}
+              onWillOpen={handleRowWillOpen}
             />
           ))}
         </View>
@@ -393,7 +478,7 @@ export default function IdeasScreen() {
                   accessibilityRole="button"
                   accessibilityLabel="彻底删掉这条想法"
                   hitSlop={8}
-                  onPress={() => void removeIdea(idea.id)}>
+                  onPress={() => deleteOneIdea(idea.id)}>
                   <Ionicons name="trash-outline" size={17} color={theme.textSecondary} />
                 </Pressable>
               </View>
@@ -429,8 +514,10 @@ function IdeaRow({
   onToggleSelect,
   onOpen,
   onArchive,
+  onDelete,
   onTagTap,
   onEditTags,
+  onWillOpen,
 }: {
   idea: Idea;
   /** 已经转成任务了吗（转出来的那条任务还在） */
@@ -443,121 +530,151 @@ function IdeaRow({
   onToggleSelect?: (idea: Idea) => void;
   onOpen: () => void;
   onArchive: (id: string) => void;
+  onDelete: (id: string) => void;
   /** 点标签 chip = 按这个标签筛选 */
   onTagTap?: (tag: string) => void;
   /** 点「＋标签」= 打开编辑面板 */
   onEditTags?: () => void;
+  /** 本行即将滑开时通知页面，好把别的行收回去 */
+  onWillOpen?: (close: () => void) => void;
 }) {
   const theme = useTheme();
+  const swipeRef = useRef<SwipeableMethods | null>(null);
   const handlePress = () => {
     if (selecting) onToggleSelect?.(idea);
     else onOpen();
   };
   return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={
-        selecting
-          ? selected
-            ? '取消选择'
-            : '选择'
-          : `打开「${idea.content}」${converted ? '（已转成任务）' : ''}`
-      }
-      onPress={handlePress}
-      style={({ pressed }) => [
-        styles.ideaRow,
-        { backgroundColor: theme.backgroundElement, opacity: pressed ? 0.7 : 1 },
-      ]}>
-      {selecting ? (
-        <View
-          style={[
-            styles.ideaSelectBox,
-            {
-              borderColor: selected ? theme.tint : theme.textSecondary,
-              backgroundColor: selected ? theme.tint : 'transparent',
-            },
-          ]}>
-          {selected ? (
-            <Ionicons name="checkmark" size={14} color={theme.background} />
-          ) : null}
+    /*
+      左滑出「归档 / 删除」。
+      ⚠️ 为什么不做成行内的按钮：此前行右侧挂着一个常驻的归档图标，而删除
+      **根本没有入口**（详情页也只有归档）。那个常驻图标的毛病是"永远在手边" ——
+      一条想法被越读越多、越想越久，最不需要的就是一个随手可点的"收起来"。
+      左滑把两者都收进"你得先做个动作"里，列表也因此空出一整列给内容本身。
+      ⚠️ 多选模式下关掉手势：那时整行是"选择"语义，左滑会撞车。
+    */
+    <ReanimatedSwipeable
+      ref={swipeRef}
+      enabled={!selecting}
+      rightThreshold={36}
+      // 没有左侧动作，允许回弹就会在左边露出片空白
+      overshootRight={false}
+      onSwipeableWillOpen={() => onWillOpen?.(() => swipeRef.current?.close())}
+      // 行本身是圆角块，露出的按钮得跟它同一个圆角轮廓，否则角上会凸出来
+      containerStyle={styles.swipeContainer}
+      renderRightActions={() => (
+        <View style={styles.swipeActions}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`归档「${idea.content}」（能在下面的归档箱里放回来）`}
+            onPress={() => onArchive(idea.id)}
+            style={[styles.swipeAction, { backgroundColor: theme.backgroundSelected }]}>
+            <Ionicons name="archive-outline" size={19} color={theme.text} />
+            <ThemedText type="small" themeColor="text">
+              归档
+            </ThemedText>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`删除「${idea.content}」`}
+            onPress={() => onDelete(idea.id)}
+            style={[styles.swipeAction, { backgroundColor: theme.text }]}>
+            <Ionicons name="trash-outline" size={19} color={theme.background} />
+            <ThemedText type="small" themeColor="background">
+              删除
+            </ThemedText>
+          </Pressable>
         </View>
-      ) : null}
-      <View style={styles.ideaBody}>
-        <ThemedText numberOfLines={5}>{idea.content}</ThemedText>
+      )}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={
+          selecting
+            ? selected
+              ? '取消选择'
+              : '选择'
+            : `打开「${idea.content}」${converted ? '（已转成任务）' : ''}`
+        }
+        onPress={handlePress}
+        style={({ pressed }) => [
+          styles.ideaRow,
+          { backgroundColor: theme.backgroundElement, opacity: pressed ? 0.7 : 1 },
+        ]}>
+        {selecting ? (
+          <View
+            style={[
+              styles.ideaSelectBox,
+              {
+                borderColor: selected ? theme.tint : theme.textSecondary,
+                backgroundColor: selected ? theme.tint : 'transparent',
+              },
+            ]}>
+            {selected ? (
+              <Ionicons name="checkmark" size={14} color={theme.background} />
+            ) : null}
+          </View>
+        ) : null}
+        <View style={styles.ideaBody}>
+          <ThemedText numberOfLines={5}>{idea.content}</ThemedText>
 
-        {/*
-          标签 chip 行。有标签就显示 chip + 末尾「＋」加标；没有标签就只显示「＋ 标签」入口。
-          多选模式下整行是"选择"语义，标签不再可点（既不筛选也不编辑），只作展示。
-        */}
-        {idea.tags.length ? (
-          <View style={styles.tagRow}>
-            {idea.tags.map((tag) => (
-              <Pressable
-                key={tag}
-                accessibilityRole="button"
-                accessibilityLabel={`按标签「${tag}」筛选`}
-                disabled={selecting}
-                onPress={(event) => {
-                  event.stopPropagation();
-                  onTagTap?.(tag);
-                }}
-                style={[styles.tagChip, { borderColor: theme.backgroundSelected }]}>
-                <ThemedText type="small" themeColor="textSecondary">
-                  {tag}
-                </ThemedText>
-              </Pressable>
-            ))}
-            {!selecting ? (
+          {/*
+            标签 chip 行。有标签就显示 chip + 末尾「＋」加标；没有标签就只显示「＋ 标签」入口。
+            多选模式下整行是"选择"语义，标签不再可点（既不筛选也不编辑），只作展示。
+          */}
+          {idea.tags.length ? (
+            <View style={styles.tagRow}>
+              {idea.tags.map((tag) => (
+                <Pressable
+                  key={tag}
+                  accessibilityRole="button"
+                  accessibilityLabel={`按标签「${tag}」筛选`}
+                  disabled={selecting}
+                  onPress={(event) => {
+                    event.stopPropagation();
+                    onTagTap?.(tag);
+                  }}
+                  style={[styles.tagChip, { borderColor: theme.backgroundSelected }]}>
+                  <ThemedText type="small" themeColor="textSecondary">
+                    {tag}
+                  </ThemedText>
+                </Pressable>
+              ))}
+              {!selecting ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="添加标签"
+                  onPress={(event) => {
+                    event.stopPropagation();
+                    onEditTags?.();
+                  }}
+                  style={[styles.tagChip, styles.tagAdd, { borderColor: theme.tint }]}>
+                  <Ionicons name="add" size={14} color={theme.tint} />
+                </Pressable>
+              ) : null}
+            </View>
+          ) : (
+            !selecting ? (
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="添加标签"
                 onPress={(event) => {
                   event.stopPropagation();
                   onEditTags?.();
-                }}
-                style={[styles.tagChip, styles.tagAdd, { borderColor: theme.tint }]}>
-                <Ionicons name="add" size={14} color={theme.tint} />
+                }}>
+                <ThemedText type="small" themeColor="tint">
+                  ＋ 标签
+                </ThemedText>
               </Pressable>
-            ) : null}
-          </View>
-        ) : (
-          !selecting ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="添加标签"
-              onPress={(event) => {
-                event.stopPropagation();
-                onEditTags?.();
-              }}>
-              <ThemedText type="small" themeColor="tint">
-                ＋ 标签
-              </ThemedText>
-            </Pressable>
-          ) : null
-        )}
+            ) : null
+          )}
 
-        <ThemedText type="small" themeColor="textSecondary" style={styles.ideaMeta}>
-          {formatMonthDay(new Date(idea.createdAt))} 记下
-          {converted ? ' · 已转成任务' : ''}
-        </ThemedText>
-      </View>
-      {/*
-        归档按钮在内层。web 上 click 会冒泡，不拦一下的话点归档会顺带把整行的
-        "打开详情"也触发了（原生上内层本来就赢得手势，这一句是两端的统一保险）。
-      */}
-      {!selecting ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="归档这条想法（可以在下面的归档箱里找回来）"
-          hitSlop={8}
-          onPress={(event) => {
-            event.stopPropagation();
-            onArchive(idea.id);
-          }}>
-          <Ionicons name="archive-outline" size={18} color={theme.textSecondary} />
-        </Pressable>
-      ) : null}
-    </Pressable>
+          <ThemedText type="small" themeColor="textSecondary" style={styles.ideaMeta}>
+            {formatMonthDay(new Date(idea.createdAt))} 记下
+            {converted ? ' · 已转成任务' : ''}
+          </ThemedText>
+        </View>
+      </Pressable>
+    </ReanimatedSwipeable>
   );
 }
 
@@ -573,6 +690,25 @@ const styles = StyleSheet.create({
   },
   searchInput: { flex: 1, fontSize: 14, paddingVertical: Spacing.one },
   list: { gap: Spacing.two },
+  /**
+   * 左滑露出的容器。圆角与行一致 + 裁切 —— 行滑开后露出的按钮才会
+   * 跟着行的圆角轮廓走，而不是在角上凸出两个直角。
+   */
+  swipeContainer: { borderRadius: Spacing.three, overflow: 'hidden' },
+  /** 一次滑出来的两个动作。父层是 row-reverse，这一排会自动贴到行的右边缘 */
+  swipeActions: { flexDirection: 'row' },
+  /**
+   * 单个动作键：竖排图标 + 文字，占满行高。
+   * ⚠️ 删除与归档刻意只差一档色（浅灰底 / 实底反白）：这套调色板刻意没有
+   * 彩色强调，不为"危险"单开一个红色。会用这个界面的人认得
+   * "最重的那个 = 最不能反悔的那个" —— 正是全 app 主按钮的同一个语言。
+   */
+  swipeAction: {
+    width: 76,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+  },
   ideaRow: {
     flexDirection: 'row',
     alignItems: 'flex-start',

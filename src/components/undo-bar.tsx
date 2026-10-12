@@ -8,8 +8,16 @@ import { useTheme } from '@/hooks/use-theme';
 export interface UndoBarProps {
   /** 是否出现。隐藏时直接不渲染，不占位 */
   visible: boolean;
-  /** 被删的条数，用于文案 */
+  /** 被操作掉的条数，用于默认文案（"已删 N 条"） */
   count: number;
+  /**
+   * 自定义文案。不传就按 `count` 说"已删 N 条"。
+   *
+   * 加它的理由：**归档也要撤销**，而"归档"和"删除"在用户眼里不是一回事 ——
+   * 把归档说成"已删"会让人以为东西没了，去归档箱里翻纯属白费。
+   * 但两者共用这一条提示（同一位置、同一个「撤销」），所以只让文案可变。
+   */
+  message?: string;
   /** 点「撤销」：整批恢复（任务 + 子任务挂回 + 打卡 + 重排提醒） */
   onUndo: () => void;
   /** 点「×」或自动忽略：收起这条提示，撤销机会随之消失 */
@@ -17,12 +25,12 @@ export interface UndoBarProps {
 }
 
 /**
- * 删除后的可撤销提示条。
+ * 操作之后的可撤销提示条。
  *
  * ⚠️ **不自动消失**：撤销机会一旦被计时器吃掉，用户就没法反悔了。
  * 它停在页面底部，直到用户「撤销」或手动「×」关掉，或切走这一页。
  */
-export function UndoBar({ visible, count, onUndo, onDismiss }: UndoBarProps) {
+export function UndoBar({ visible, count, message, onUndo, onDismiss }: UndoBarProps) {
   const theme = useTheme();
   if (!visible) return null;
   return (
@@ -30,7 +38,7 @@ export function UndoBar({ visible, count, onUndo, onDismiss }: UndoBarProps) {
       accessibilityRole="alert"
       style={[styles.bar, { backgroundColor: theme.backgroundElement }]}>
       <ThemedText type="small" themeColor="text" style={styles.text}>
-        {count > 0 ? `已删 ${count} 条` : '已删除'}
+        {message ?? (count > 0 ? `已删 ${count} 条` : '已删除')}
       </ThemedText>
       <View style={styles.actions}>
         <Pressable

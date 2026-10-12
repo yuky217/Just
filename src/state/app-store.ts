@@ -174,9 +174,13 @@ interface AppState {
   loadArchivedIdeas: () => Promise<Idea[]>;
   /** 从归档箱放回主列表 —— 没有它，归档就是一道单向门 */
   unarchiveIdea: (id: string) => Promise<void>;
-  /** 真删一条想法（软删除）。只在归档箱里露出来：主列表上给"删除"太容易手滑。 */
-  removeIdea: (id: string) => Promise<void>;
-  /** 批量删想法，返回撤销凭据 —— 同 `removeTasks`，一次删一屏就得留一条退路 */
+  /**
+   * 删想法，返回撤销凭据 —— 同 `removeTasks`。
+   *
+   * 单条和整屏都是它：想法页左滑的「删除」和归档箱里的「彻底删掉」删的都只有
+   * 一条，但**删除必须是可撤销的**（一次手滑就是永久的事），而撤销凭据只有
+   * 这条路交得回来。此前那个不返回凭据的 `removeIdea` 已随左滑一起删掉。
+   */
   removeIdeas: (ids: readonly string[]) => Promise<IdeaDeleteUndo>;
   undoDeleteIdeas: (undo: IdeaDeleteUndo) => Promise<void>;
   /**
@@ -617,11 +621,6 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   unarchiveIdea: async (id) => {
     await ideaRepository.unarchive(id);
-    await get().refresh();
-  },
-
-  removeIdea: async (id) => {
-    await ideaRepository.softDelete(id);
     await get().refresh();
   },
 
