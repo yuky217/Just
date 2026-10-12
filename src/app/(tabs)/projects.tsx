@@ -211,7 +211,7 @@ export default function ProjectsScreen() {
             </Pressable>
           </View>
           <ThemedText type="small" themeColor="textSecondary" style={styles.footnote}>
-            目标看方向、项目看进度、文件夹只管分类
+            目标看方向、项目看进度
           </ThemedText>
         </Card>
       ) : null}

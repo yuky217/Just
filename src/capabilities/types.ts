@@ -10,8 +10,13 @@
 export const AiCapability = {
   /** 理解：一段自然语言 → 结构化任务 */
   Understand: 'understand',
-  /** 归类：自动判断是灵感还是待办、进哪个项目 */
-  Classify: 'classify',
+  /*
+   * 曾经有个 Classify（自动判断这条记录是灵感还是待办）。
+   * 2026-10-13 撤掉：这件事**用户自己分就够了** —— 一句话是念头还是要办的事，
+   * 用户比模型清楚，而模型判错了他还得回头去改。与其留一个"AI 替你决定归属"
+   * 的开关，不如把那个力气花在让他**当场一秒选定**上（见 capture-input 的「项目」chip）。
+   * 设置里挂着一个永远不会接线的开关，就是界面在承诺一件不做的事。
+   */
   /** 拆解：把"写毕业论文"拆成可执行步骤 */
   Breakdown: 'breakdown',
   /** 排期：结合优先级和空闲时间给出建议安排 */
@@ -34,11 +39,6 @@ export const AI_CAPABILITIES: readonly AiCapabilityMeta[] = [
     id: AiCapability.Understand,
     name: '理解',
     description: '把一句话变成带时间、带类型的任务',
-  },
-  {
-    id: AiCapability.Classify,
-    name: '归类',
-    description: '自动判断该进想法库还是待办',
   },
   {
     /**

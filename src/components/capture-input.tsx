@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { Modal, Pressable, StyleSheet, TextInput, View } from 'react-native';
 
 import { understandText } from '@/capabilities/client';
 import { ChoiceSheet, type ChoiceOption } from '@/components/choice-sheet';
@@ -15,14 +15,20 @@ import {
 } from '@/components/date-time-picker';
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
-import type { Container } from '@/domain/container';
+import { CONTAINER_KIND_LABEL } from '@/domain/container-stats';
 import { parseSchedule, type ParsedSchedule } from '@/domain/parse-schedule';
 import { describeReminder, describeRepeat, REMINDER_PRESETS, REPEAT_PRESETS } from '@/domain/repeat-next';
 import { resolveReminderMinutes } from '@/domain/reminder';
 import { decideRoute } from '@/domain/routing';
 import { timeAnchor, type RepeatRule, type TaskTime } from '@/domain/task';
 import { useTheme } from '@/hooks/use-theme';
+import { useAppStore } from '@/state/app-store';
 import { selectCapabilityGate, useSettings } from '@/state/settings-store';
+
+/** ChoiceSheet 里「不归入任何项目」那一项的 key */
+const NO_CONTAINER = '__none__';
+/** ChoiceSheet 里「新建项目」那一项的 key */
+const NEW_CONTAINER = '__new__';
 
 /** ChoiceSheet 里「不提醒」那一项的 key */
 const REMINDER_OFF = '__off__';
@@ -67,13 +73,11 @@ export interface CaptureInputProps {
   /**
    * 整条就是"记灵感"用的（想法页）。
    *
-   * 想法**不排期、不提醒、不归清单**，所以那四个快捷设置在这儿一个都不该出现 ——
+   * 想法**不排期、不提醒、不归项目**，所以那四个快捷设置在这儿一个都不该出现 ——
    * 摆着就是误导：用户会去点「时间」，点了才发现"灵感"根本用不上，
    * 于是怀疑是自己哪儿没弄对。既然这一格只有一种归属，界面就只给一种可能。
    */
   ideaOnly?: boolean;
-  /** 可选的归属清单（来自 store 的容器） */
-  containers?: Container[];
   /** 时间面板顶部的快捷预设（如"今天 18:00"）。不传就只有手选 */
   timePresets?: readonly DateTimePreset[];
   /** 初值：通知栏弹窗深链进来时把原文带过来（app/capture 的 ?text= 参数） */
@@ -95,13 +99,18 @@ export function CaptureInput({
   submitLabel = '记下',
   showIdeaToggle = true,
   ideaOnly = false,
-  containers,
   timePresets,
   initialText,
   autoSubmit = false,
   onSubmit,
 }: CaptureInputProps) {
   const theme = useTheme();
+  /**
+   * 归属项目的候选**直接从 store 读**，不再由调用方传（以前是个 `containers` prop，
+   * 但**没有任何一个调用方传过它** —— 于是那个「项目」chip 点开永远是空的，
+   * 只剩一句"不归入"。一个 prop 没人传却看着像在生效，比没有更坏）。
+   */
+  const containers = useAppStore((state) => state.containers);
   const [text, setText] = useState(initialText ?? '');
   /** 用户在记录页自己勾的「这是灵感」；想法页不用它（那边 ideaOnly 恒真） */
   const [ideaToggled, setIdeaToggled] = useState(false);
@@ -115,6 +124,13 @@ export function CaptureInput({
   const [time, setTime] = useState<TaskTime | null>(null);
   const [draft, setDraft] = useState<DateTimeDraft>(() => defaultDraft());
   const [containerId, setContainerId] = useState<string | null>(null);
+  /**
+   * 新建项目：**在记录的同时顺手建一个**，不用先跑去项目页建好再回来记。
+   * 这是"想归到某个项目、但那个项目还不存在"时的唯一出路 ——
+   * 没有它，用户只能二选一：要么先放弃这条记录去建项目，要么先记成无归属再回头挂。
+   */
+  const [creatingContainer, setCreatingContainer] = useState(false);
+  const [newContainerTitle, setNewContainerTitle] = useState('');
   const [repeat, setRepeat] = useState<RepeatRule | null>(null);
   /**
    * 提醒提前量：**三态**。
@@ -225,15 +241,38 @@ export function CaptureInput({
     }
   };
 
+  /**
+   * 归属项目的那份选项：**不归入**排最前（它是默认、也是最常见的答案），
+   * **新建**排最后（看完已有项目没有想要的，才轮到它）。
+   * 两项都不是"某个已有项目"，但都必须是用户一眼能点到的选择 ——
+   * 少了任何一个，这个 chip 都会把人卡住：要么被迫归进某个项目，
+   * 要么被迫先离开这一页去建项目、回来时那句话已经忘了。
+   */
   const listOptions: ChoiceOption[] = [
-    { key: '__none__', label: '不归入清单' },
-    ...(containers ?? []).map((c) => ({
+    { key: NO_CONTAINER, label: '不归入' },
+    ...containers.map((c) => ({
       key: c.id,
       label: c.title,
-      hint: c.kind === 'goal' ? '目标' : '项目',
+      hint: CONTAINER_KIND_LABEL[c.kind],
     })),
+    { key: NEW_CONTAINER, label: '＋ 新建项目' },
   ];
-  const currentContainer = (containers ?? []).find((c) => c.id === containerId) ?? null;
+  const currentContainer = containers.find((c) => c.id === containerId) ?? null;
+
+  /**
+   * 建好新项目并**当场选中它**：用户走到"新建"这一步，意图已经明确 ——
+   * 这条要归到一个还不存在的项目。建完再让他回列表里点一次是白加的一步。
+   * 容器**立刻落库**（与项目页的新建同一口径）：他确实建了个项目，
+   * 就算这条记录最后没记成，也不该把项目一并吞掉。
+   */
+  const confirmNewContainer = async () => {
+    const title = newContainerTitle.trim();
+    if (!title) return;
+    const created = await useAppStore.getState().createContainer({ title });
+    setContainerId(created.id);
+    setCreatingContainer(false);
+    setNewContainerTitle('');
+  };
 
   const repeatOptions: ChoiceOption[] = REPEAT_PRESETS.map((p) => ({
     key: p.id,
@@ -248,7 +287,7 @@ export function CaptureInput({
   ];
 
   /**
-   * 快捷设置那一排。想法态下为 null —— 想法不排期、不提醒、也不归清单，
+   * 快捷设置那一排。想法态下为 null —— 想法不排期、不提醒、也不归项目，
    * 这四个键摆在那儿只会让人以为"灵感也得定个时间"。
    *
    * 提成变量而不是在 JSX 里写三目：这一排要么整排在、要么整排不在，
@@ -268,7 +307,7 @@ export function CaptureInput({
       />
       <QuickButton
         icon="folder-outline"
-        label={currentContainer ? currentContainer.title : '清单'}
+        label={currentContainer ? currentContainer.title : '项目'}
         active={Boolean(currentContainer)}
         onPress={() => setSheet('list')}
         onClear={currentContainer ? () => setContainerId(null) : undefined}
@@ -368,12 +407,19 @@ export function CaptureInput({
 
       <ChoiceSheet
         visible={sheet === 'list'}
-        title="归入哪个清单"
+        title="归入哪个项目"
         options={listOptions}
-        selectedKey={containerId ?? '__none__'}
+        selectedKey={containerId ?? NO_CONTAINER}
         onClose={() => setSheet(null)}
         onSelect={(key) => {
-          setContainerId(key === '__none__' ? null : key);
+          // 「新建」不是选中某一项，是换一条路 —— 收起选择面板、改开输入
+          if (key === NEW_CONTAINER) {
+            setSheet(null);
+            setNewContainerTitle('');
+            setCreatingContainer(true);
+            return;
+          }
+          setContainerId(key === NO_CONTAINER ? null : key);
           setSheet(null);
         }}
       />
@@ -403,6 +449,64 @@ export function CaptureInput({
           setSheet(null);
         }}
       />
+
+      {/*
+        新建项目。**刻意不用 ChoiceSheet**：那是一张"从固定选项里挑一个"的面板，
+        这里要的是**输入**。硬塞进去会让那个通用组件长出两副面孔（另外三处用它
+        都是纯选择），也会把"挑一个已有的"和"造一个新的"混在同一屏里。
+      */}
+      <Modal
+        visible={creatingContainer}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCreatingContainer(false)}>
+        <Pressable style={styles.newBackdrop} onPress={() => setCreatingContainer(false)}>
+          <Pressable
+            style={[styles.newBox, { backgroundColor: theme.background }]}
+            onPress={(e) => e.stopPropagation()}>
+            <ThemedText type="smallBold">新建项目</ThemedText>
+            <TextInput
+              value={newContainerTitle}
+              onChangeText={setNewContainerTitle}
+              autoFocus
+              placeholder="比如：毕业论文"
+              placeholderTextColor={theme.textSecondary}
+              returnKeyType="done"
+              onSubmitEditing={() => void confirmNewContainer()}
+              style={[styles.newInput, { color: theme.text, borderColor: theme.backgroundSelected }]}
+            />
+            <View style={styles.newActions}>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => setCreatingContainer(false)}
+                style={[styles.newBtn, { backgroundColor: theme.backgroundSelected }]}>
+                <ThemedText type="small" themeColor="textSecondary">
+                  取消
+                </ThemedText>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => void confirmNewContainer()}
+                style={[
+                  styles.newBtn,
+                  {
+                    backgroundColor: newContainerTitle.trim()
+                      ? theme.text
+                      : theme.backgroundSelected,
+                  },
+                ]}>
+                <ThemedText
+                  type="small"
+                  style={{
+                    color: newContainerTitle.trim() ? theme.background : theme.textSecondary,
+                  }}>
+                  建好
+                </ThemedText>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -513,5 +617,31 @@ const styles = StyleSheet.create({
     borderWidth: 1.2,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  newBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: Spacing.four,
+  },
+  newBox: {
+    width: '100%',
+    borderRadius: Spacing.three,
+    padding: Spacing.three,
+    gap: Spacing.two,
+  },
+  newInput: {
+    borderRadius: Spacing.two,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+    fontSize: 15,
+  },
+  newActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: Spacing.two },
+  newBtn: {
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+    borderRadius: Spacing.two,
   },
 });
