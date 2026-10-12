@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
 import { CompletionRule, TaskKind, TaskStatus } from './enums';
-import { DEFAULT_EVENT_MINUTES, isActiveNow, isMuted, taskDisplayState, taskWindow } from './task-state';
+import {
+  DEFAULT_EVENT_MINUTES,
+  isActiveNow,
+  isMuted,
+  isOpenTask,
+  taskDisplayState,
+  taskWindow,
+} from './task-state';
 import type { Task, TaskTime } from './task';
 
 /**
@@ -163,5 +170,36 @@ describe('isActiveNow', () => {
 
   it('只有截止、没有开始的事不会算作"正在进行"', () => {
     expect(isActiveNow(makeTask({ time: deadline(iso(2026, 10, 6, 18)) }), now)).toBe(false);
+  });
+});
+
+/**
+ * 「欠着的那几件」—— 月历圆点的深浅、周视图表头那颗点、小组件分桶共用这一条。
+ *
+ * 它**只问完成态**：界面上弱化不弱化是另一回事（`isMuted`），
+ * 别把两者混起来 —— 混了就会出现"上周三的会看起来过去了，于是月历说这天不欠事"，
+ * 而那条任务其实一直没勾。
+ */
+describe('isOpenTask', () => {
+  const now = new Date(iso(2026, 10, 6, 15));
+
+  it('没勾的算欠着，勾了的算已了结', () => {
+    expect(isOpenTask(makeTask())).toBe(true);
+    expect(isOpenTask(makeTask({ status: TaskStatus.Done }))).toBe(false);
+  });
+
+  it('⚠️ 过了时间的固定型也算欠着 —— 时间过了绝不自动完成', () => {
+    const missed = makeTask({ time: fixed(iso(2026, 10, 6, 9), iso(2026, 10, 6, 10)) });
+    // 界面上它被弱化成"已经过去了"……
+    expect(taskDisplayState(missed, now)).toBe('missed');
+    expect(isMuted(taskDisplayState(missed, now))).toBe(true);
+    // ……但它确实没勾，所以仍然要算进"这天还欠着"
+    expect(isOpenTask(missed)).toBe(true);
+  });
+
+  it('过期的截止型同样算欠着', () => {
+    const overdue = makeTask({ time: deadline(iso(2026, 10, 6, 12)) });
+    expect(taskDisplayState(overdue, now)).toBe('overdue');
+    expect(isOpenTask(overdue)).toBe(true);
   });
 });

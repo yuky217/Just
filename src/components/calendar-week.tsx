@@ -13,7 +13,7 @@ import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import type { CourseSlot } from '@/domain/course';
 import { layoutLanes, type LanePlacement } from '@/domain/lane-layout';
-import { isMuted, taskDisplayState } from '@/domain/task-state';
+import { isMuted, isOpenTask, taskDisplayState } from '@/domain/task-state';
 import { taskAnchor, type Task } from '@/domain/task';
 import { useTheme } from '@/hooks/use-theme';
 
@@ -273,6 +273,20 @@ export function CalendarWeek({
         {days.map((day, column) => {
           const key = dayKey(day);
           const count = tasksByDay.get(key)?.length ?? 0;
+          /*
+           * 表头这颗点是**月历圆点在周视图里的对应物** —— 它要说同一件事：
+           * 「这天还欠着事」。
+           *
+           * 月历靠圆点深浅说（未完成 = 深、已了结 = 浅，见 `domain/calendar-shape`），
+           * 而这里一直只会画 `textSecondary` 一种颜色，等于**永远在说"都干完了"**。
+           * 现在跟同一套口径：那天还有一条没勾的任务就画深色。
+           * 判据收在 `isOpenTask`（日历页的 `openCountsByDay`、小组件分桶共用同一条）。
+           *
+           * ⚠️ 块本身**不跟着染**：周视图的块已经有自己的说法 ——
+           * 左色条说"这是截止还是一段事"（截止型浅色条，与日视图同一条），
+           * 划线 + 半透明说"做完了"。再叠一层深浅会把前两条淹掉。
+           */
+          const open = (tasksByDay.get(key) ?? []).some(isOpenTask);
           const today = isSameDay(day, now);
           const hovered = hover?.column === column;
           return (
@@ -298,7 +312,9 @@ export function CalendarWeek({
               </View>
               <View style={styles.countDot}>
                 {count ? (
-                  <View style={[styles.dot, { backgroundColor: theme.textSecondary }]} />
+                  <View
+                    style={[styles.dot, { backgroundColor: open ? theme.text : theme.textSecondary }]}
+                  />
                 ) : null}
               </View>
             </Pressable>

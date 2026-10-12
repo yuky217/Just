@@ -2,9 +2,9 @@ import { addDays, startOfDay } from 'date-fns';
 
 import { dayShapes, type DayDot, type DayMarks } from '@/domain/calendar-shape';
 import { coursesOnDate, type Course, type Term } from '@/domain/course';
-import { TaskStatus } from '@/domain/enums';
 import type { CalEvent } from '@/domain/event';
 import { taskAnchor, type Task } from '@/domain/task';
+import { isOpenTask } from '@/domain/task-state';
 import { dayKeyOf, toDayKey } from '@/utils/datetime';
 
 /**
@@ -71,7 +71,7 @@ export function collectWidgetDays(input: WidgetDaysInput): WidgetDayCell[] {
     if (!key) continue;
     const bucket = taskCounts.get(key) ?? { total: 0, open: 0 };
     bucket.total += 1;
-    if (task.status !== TaskStatus.Done) bucket.open += 1;
+    if (isOpenTask(task)) bucket.open += 1;
     taskCounts.set(key, bucket);
   }
 

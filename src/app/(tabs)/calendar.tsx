@@ -59,7 +59,7 @@ import { buildMonthPlan } from '@/domain/month-plan';
 import { parseSchedule } from '@/domain/parse-schedule';
 import { buildPlacedTime, buildRetimedSpanTime, buildRetimedTime, buildTimeOnDay } from '@/domain/schedule-presets';
 import { NO_TIME, taskAnchor, type Task, type TaskTime } from '@/domain/task';
-import { isMuted, taskDisplayState } from '@/domain/task-state';
+import { isMuted, isOpenTask, taskDisplayState } from '@/domain/task-state';
 import { groupTodos } from '@/domain/todo';
 import { useCrossDayDrag, type CrossDayDragGesture } from '@/hooks/use-cross-day-drag';
 import { useTheme } from '@/hooks/use-theme';
@@ -468,7 +468,8 @@ export default function CalendarScreen() {
       counts.set(key, (counts.get(key) ?? 0) + 1);
       // 「其中还欠着几件」——月历圆点靠它分深浅（见 domain/calendar-shape）。
       // 只有任务有完成态，所以这个数只在这儿算，课/考试不参与。
-      if (task.status !== TaskStatus.Done) {
+      // 判"欠着"收在 `isOpenTask` 一处：周视图表头、小组件分桶用的是同一条。
+      if (isOpenTask(task)) {
         openCounts.set(key, (openCounts.get(key) ?? 0) + 1);
       }
       const bucket = tasks.get(key) ?? [];

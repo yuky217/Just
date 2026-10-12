@@ -101,3 +101,20 @@ export function isActiveNow(task: Pick<Task, 'status' | 'time'>, now: Date = new
 export function isMuted(state: TaskDisplayState): boolean {
   return state === 'done' || state === 'missed';
 }
+
+/**
+ * 这条任务是不是**还没做完** —— 也就是"欠着的那几件"里的一个。
+ *
+ * 为什么要单独有这个函数：同一条判断（`status !== Done`）此前散在
+ * **日历页的 `openCountsByDay`**（月历圆点的深浅）和
+ * **`widget-days` 的按天分桶**（周卡/月卡）两处；周视图表头那颗点也要用它，
+ * 就变成三处各写一遍。月历的深浅口径一旦要动（比如"过了时间的截止也算欠着"），
+ * 漏改任何一处就会出现"月历说还欠着、周视图说全干完了"。
+ *
+ * ⚠️ 它**只回答完成态**，不看时间 —— "已经过去"是另一回事（`isMuted`），
+ * 上周三的会没勾选，按这条仍然算"没做完"，因为项目铁律是
+ * **时间过了绝不自动完成**。
+ */
+export function isOpenTask(task: Pick<Task, 'status'>): boolean {
+  return task.status !== TaskStatus.Done;
+}
