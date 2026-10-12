@@ -118,4 +118,23 @@ export const ideaRepository = {
       [nowIso(), nowIso(), id],
     );
   },
+
+  /** 批量软删（一次清掉多条） */
+  async softDeleteMany(ids: readonly string[]): Promise<void> {
+    for (const id of ids) {
+      await this.softDelete(id);
+    }
+  },
+
+  /** 批量恢复（撤销删除）。同 taskRepository：删除时间不保留，只还原"没删"这件事 */
+  async restoreMany(ids: readonly string[]): Promise<void> {
+    const db = await getDatabase();
+    const now = nowIso();
+    for (const id of ids) {
+      await db.runAsync(
+        `UPDATE ${TABLE} SET deleted_at = NULL, updated_at = ? WHERE id = ?`,
+        [now, id],
+      );
+    }
+  },
 };

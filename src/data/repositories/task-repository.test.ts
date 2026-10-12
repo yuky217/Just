@@ -4,12 +4,14 @@ import { DatabaseSync } from 'node:sqlite';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { bootstrapDatabase, type BootstrapDb, type SqlParams } from '@/data/db/bootstrap';
-import { TaskKind, TaskStatus, TimeAttribute } from '@/domain/enums';
+import { CompletionRule, TaskKind, TaskStatus, TimeAttribute } from '@/domain/enums';
 import { createSubtask, createTask, newBreakdownBatch } from '@/domain/factory';
 import { undoableBreakdown } from '@/domain/subtask-progress';
 import type { Task } from '@/domain/task';
 import { groupTodos } from '@/domain/todo';
+import { toDayKey } from '@/utils/datetime';
 
+import { checkinRepository } from './checkin-repository';
 import { taskRepository } from './task-repository';
 
 /**
@@ -52,6 +54,13 @@ function memoryDb(): { db: DatabaseSync; adapter: TestDb } {
 
 /** 无时间的执行型任务（待办里的样子） */
 const untimed = () => createTask({ title: '写周报', kind: TaskKind.Execution });
+/** 习惯型（按次数判定，打卡才有效果） */
+const habitTask = () =>
+  createTask({
+    title: '跑步',
+    kind: TaskKind.Habit,
+    completion: CompletionRule.Frequency,
+  });
 /** 有固定时间的任务（日历上的样子） */
 const scheduled = () =>
   createTask({
@@ -159,10 +168,10 @@ describe('taskRepository 的查询口径', () => {
 
     const kids = await taskRepository.listSubtasks(parent.id);
     expect(kids).toHaveLength(3);
-    expect(kids.filter((k) => k.breakdownBatch === batch).map((k) => k.title)).toEqual([
-      '定题目',
-      '查文献',
-    ]);
+    // 顺序无关：listSubtasks 按 created_at DESC 排，断言只关心"这两步都打上了批次"
+    expect(
+      kids.filter((k) => k.breakdownBatch === batch).map((k) => k.title).sort(),
+    ).toEqual(['定题目', '查文献']);
     // 手写加的那一步没有批次 —— 撤销拆解不能顺手删掉它
     expect(kids.find((k) => k.id === handWritten.id)?.breakdownBatch ?? null).toBeNull();
     expect(undoableBreakdown(kids)).toEqual({ batch, count: 2 });
@@ -427,5 +436,70 @@ describe('地点：存得下，也读得回', () => {
 
     await taskRepository.update(task.id, { location: null });
     expect((await taskRepository.getById(task.id))?.location).toBeNull();
+  });
+
+  it('⭐ 批量删除能整批撤销 —— 撤销凭据就是为这个存在的', async () => {
+    const a = untimed();
+    const b = untimed();
+    await taskRepository.create(a);
+    await taskRepository.create(b);
+    const kid = createSubtask(a.id, '拆出来的一步');
+    await taskRepository.create(kid);
+
+    // 删之前先把关系记下来（store.removeTasks 就是这么做的）
+    const parentLinks = (await taskRepository.listSubtasks(a.id)).map((k) => ({
+      id: k.id,
+      parentId: a.id,
+    }));
+    await taskRepository.detachSubtasks(a.id);
+    await taskRepository.softDeleteMany([a.id, b.id]);
+
+    expect((await taskRepository.listAll()).some((t) => t.id === a.id)).toBe(false);
+    // 子任务没被删，只是解了关系 —— 删一条不该连带删掉用户拆出来的步骤
+    expect(await taskRepository.listSubtasks(a.id)).toHaveLength(0);
+
+    await taskRepository.restoreMany([a.id, b.id]);
+    await taskRepository.restoreParentLinks(parentLinks);
+
+    expect((await taskRepository.listAll()).some((t) => t.id === a.id)).toBe(true);
+    // ⭐ 撤销 = 回到删除前：那时这一步是挂着的，撤销出来却散着就是没撤干净
+    expect((await taskRepository.listSubtasks(a.id)).map((k) => k.id)).toEqual([kid.id]);
+  });
+
+  it('删掉习惯再撤销，打卡记录要跟着回来', async () => {
+    const habit = habitTask();
+    await taskRepository.create(habit);
+    await checkinRepository.checkIn(habit.id);
+
+    const stamp = new Date().toISOString();
+    await checkinRepository.softDeleteByTask(habit.id);
+    expect(await checkinRepository.listByTask(habit.id)).toHaveLength(0);
+
+    await checkinRepository.restoreByTask(habit.id, stamp);
+    // 连续天数是从打卡记录现算的，记录不回来就等于把用户攒的历史抹了
+    expect(await checkinRepository.listByTask(habit.id)).toHaveLength(1);
+  });
+
+  it('撤销只捞这一次删掉的打卡，不复活更早主动撤掉的那次', async () => {
+    const habit = habitTask();
+    await taskRepository.create(habit);
+    const first = new Date('2026-10-01T10:00:00.000Z');
+    const second = new Date('2026-10-02T10:00:00.000Z');
+    await checkinRepository.checkIn(habit.id, first);
+    await checkinRepository.checkIn(habit.id, second);
+    // 用户自己撤过 10-01 那次（这一刻发生在删除操作开始之前）
+    await checkinRepository.undo(habit.id, first);
+    // 让 undo 的时间戳严格早于删除操作的起点——生产代码里 checkinSince
+    // 在删除循环之前就取了，软删的时间戳必然晚于它；这里用一个小间隔逼近同一语义
+    await new Promise((r) => setTimeout(r, 5));
+
+    const stamp = new Date().toISOString();
+    await checkinRepository.softDeleteByTask(habit.id);
+    await checkinRepository.restoreByTask(habit.id, stamp);
+
+    // 只该回来 10-02。复活 10-01 = 凭空造出他没做过的天数
+    expect((await checkinRepository.listByTask(habit.id)).map((c) => c.dayKey)).toEqual([
+      toDayKey(second),
+    ]);
   });
 });

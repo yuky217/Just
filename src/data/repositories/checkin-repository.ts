@@ -76,4 +76,24 @@ export const checkinRepository = {
       [now, now, taskId],
     );
   },
+
+  /**
+   * 撤销删除时把打卡记录还回来。
+   *
+   * ⭐ `sinceIso` 是**这次删除的时刻**，只有比它更晚被删的记录才算"这次带走的"。
+   * `deleted_at` 这一列分不清两种删除：用户自己撤掉某一天的打卡，和删掉任务时
+   * 连带软删的全部记录 —— 两种都往这一列写时间戳。不加这个下界，撤销就会把
+   * 用户早先主动撤销的打卡一并复活，那是凭空造出他没做过的天数。
+   *
+   * 参数必填而不是"不传就全恢复"：省略的语义看着方便，实际上就是上面那个 bug。
+   */
+  async restoreByTask(taskId: string, sinceIso: string): Promise<void> {
+    const db = await getDatabase();
+    const now = new Date().toISOString();
+    await db.runAsync(
+      `UPDATE ${TABLE} SET deleted_at = NULL, updated_at = ?
+       WHERE task_id = ? AND deleted_at IS NOT NULL AND deleted_at >= ?`,
+      [now, taskId, sinceIso],
+    );
+  },
 };

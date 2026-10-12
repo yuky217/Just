@@ -12,8 +12,10 @@ import { isCapabilityReady, suggestBreakdown } from '@/capabilities/client';
 import { AiCapability } from '@/capabilities/types';
 import { Screen } from '@/components/screen';
 import { ThemedText } from '@/components/themed-text';
-import { Spacing } from '@/constants/theme';
+import { UndoBar } from '@/components/undo-bar';
+import { BottomTabInset, Spacing } from '@/constants/theme';
 import type { Idea } from '@/domain/idea';
+import type { IdeaDeleteUndo } from '@/domain/bulk-delete';
 import { useTheme } from '@/hooks/use-theme';
 import { useAppStore } from '@/state/app-store';
 import { selectCapabilityGate, useSettings } from '@/state/settings-store';
@@ -49,10 +51,47 @@ export default function IdeasScreen() {
   const loadArchivedIdeas = useAppStore((state) => state.loadArchivedIdeas);
   const unarchiveIdea = useAppStore((state) => state.unarchiveIdea);
   const removeIdea = useAppStore((state) => state.removeIdea);
+  const removeIdeasAction = useAppStore((state) => state.removeIdeas);
+  const undoDeleteIdeasAction = useAppStore((state) => state.undoDeleteIdeas);
 
   const [keyword, setKeyword] = useState('');
   /** 正在拆的那条想法（null = 面板没开） */
   const [breaking, setBreaking] = useState<Idea | null>(null);
+  /*
+    主列表多选删除。想法页只有主列表会积压（归档箱里一条条删就够了），
+    所以选择模式只开在主列表。
+  */
+  const [selectingIdeas, setSelectingIdeas] = useState(false);
+  const [selectedIdeaIds, setSelectedIdeaIds] = useState<Set<string>>(new Set());
+  const [ideaUndoToken, setIdeaUndoToken] = useState<IdeaDeleteUndo | null>(null);
+
+  const enterSelectIdeas = useCallback(() => {
+    setSelectingIdeas(true);
+    setSelectedIdeaIds(new Set());
+  }, []);
+  const exitSelectIdeas = useCallback(() => {
+    setSelectingIdeas(false);
+    setSelectedIdeaIds(new Set());
+  }, []);
+  const toggleSelectIdea = useCallback((idea: Idea) => {
+    setSelectedIdeaIds((current) => {
+      const next = new Set(current);
+      if (next.has(idea.id)) next.delete(idea.id);
+      else next.add(idea.id);
+      return next;
+    });
+  }, []);
+  const deleteSelectedIdeas = useCallback(() => {
+    if (!selectedIdeaIds.size) return;
+    void removeIdeasAction([...selectedIdeaIds]).then((undo) => {
+      exitSelectIdeas();
+      setIdeaUndoToken(undo);
+    });
+  }, [selectedIdeaIds, removeIdeasAction, exitSelectIdeas]);
+  const undoDeleteIdeas = useCallback(() => {
+    if (!ideaUndoToken) return;
+    void undoDeleteIdeasAction(ideaUndoToken).then(() => setIdeaUndoToken(null));
+  }, [ideaUndoToken, undoDeleteIdeasAction]);
 
   /*
     这一页是 Tab，可能早就挂载着 —— 所以不能只在 useState 初值里读一次 q：
@@ -146,6 +185,40 @@ export default function IdeasScreen() {
         <Pressable hitSlop={8} onPress={() => router.push('/settings')}>
           <Ionicons name="settings-outline" size={22} color={theme.textSecondary} />
         </Pressable>
+      }
+      floating={
+        <>
+          {/*
+            多选删除的浮条。**不自动消失**：撤销机会被计时器吃掉 = 用户没法反悔。
+            - 选择中（有选中项）："已选 N · 删除"
+            - 删除后（undoToken 非空）："已删 N 条" + 「撤销」。两者互斥，先删后撤销。
+          */}
+          {selectingIdeas && selectedIdeaIds.size > 0 ? (
+            <View
+              style={[
+                styles.selectBar,
+                { backgroundColor: theme.backgroundElement },
+              ]}>
+              <ThemedText type="small" themeColor="text">
+                已选 {selectedIdeaIds.size}
+              </ThemedText>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="删除选中的想法"
+                onPress={deleteSelectedIdeas}>
+                <ThemedText type="small" themeColor="tint" style={styles.selectAction}>
+                  删除
+                </ThemedText>
+              </Pressable>
+            </View>
+          ) : null}
+          <UndoBar
+            visible={ideaUndoToken !== null}
+            count={ideaUndoToken ? ideaUndoToken.ids.length : 0}
+            onUndo={undoDeleteIdeas}
+            onDismiss={() => setIdeaUndoToken(null)}
+          />
+        </>
       }>
       {/*
         想法页这一格就是为灵感生的（ideaOnly）：不给时间/清单/重复/提醒 ——
@@ -172,6 +245,27 @@ export default function IdeasScreen() {
           placeholderTextColor={theme.textSecondary}
           style={[styles.searchInput, { color: theme.text }]}
         />
+        {selectingIdeas ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="取消选择"
+            onPress={exitSelectIdeas}
+            hitSlop={6}>
+            <ThemedText type="small" themeColor="tint">
+              取消
+            </ThemedText>
+          </Pressable>
+        ) : (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="选择想法"
+            onPress={enterSelectIdeas}
+            hitSlop={6}>
+            <ThemedText type="small" themeColor="textSecondary">
+              选择
+            </ThemedText>
+          </Pressable>
+        )}
       </View>
 
       {visible.length ? (
@@ -183,6 +277,9 @@ export default function IdeasScreen() {
                 key={idea.id}
                 idea={idea}
                 stepCount={parent ? (subtaskCount.get(parent.id) ?? 0) : 0}
+                selecting={selectingIdeas}
+                selected={selectedIdeaIds.has(idea.id)}
+                onToggleSelect={toggleSelectIdea}
                 onOpen={() => openIdea(idea)}
                 onArchive={(id) => void archiveIdea(id)}
               />
@@ -288,27 +385,60 @@ export default function IdeasScreen() {
 function IdeaRow({
   idea,
   stepCount,
+  selecting = false,
+  selected = false,
+  onToggleSelect,
   onOpen,
   onArchive,
 }: {
   idea: Idea;
   /** 已经拆出来的步数（0 = 还没拆） */
   stepCount: number;
+  /** 是否处于多选模式（主列表用） */
+  selecting?: boolean;
+  /** 本行是否被选中 */
+  selected?: boolean;
+  /** 切换选中（只在 selecting 时由整行点击调用） */
+  onToggleSelect?: (idea: Idea) => void;
   onOpen: () => void;
   onArchive: (id: string) => void;
 }) {
   const theme = useTheme();
+  const handlePress = () => {
+    if (selecting) onToggleSelect?.(idea);
+    else onOpen();
+  };
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={
-        stepCount ? `去看「${idea.content}」拆出来的任务` : `把「${idea.content}」拆成能动手的几步`
+        selecting
+          ? selected
+            ? '取消选择'
+            : '选择'
+          : stepCount
+            ? `去看「${idea.content}」拆出来的任务`
+            : `把「${idea.content}」拆成能动手的几步`
       }
-      onPress={onOpen}
+      onPress={handlePress}
       style={({ pressed }) => [
         styles.ideaRow,
         { backgroundColor: theme.backgroundElement, opacity: pressed ? 0.7 : 1 },
       ]}>
+      {selecting ? (
+        <View
+          style={[
+            styles.ideaSelectBox,
+            {
+              borderColor: selected ? theme.tint : theme.textSecondary,
+              backgroundColor: selected ? theme.tint : 'transparent',
+            },
+          ]}>
+          {selected ? (
+            <Ionicons name="checkmark" size={14} color={theme.background} />
+          ) : null}
+        </View>
+      ) : null}
       <View style={styles.ideaBody}>
         <ThemedText numberOfLines={5}>{idea.content}</ThemedText>
         <ThemedText type="small" themeColor="textSecondary" style={styles.ideaMeta}>
@@ -320,16 +450,18 @@ function IdeaRow({
         归档按钮在内层。web 上 click 会冒泡，不拦一下的话点归档会顺带把拆解面板打开
         （原生上内层本来就赢得手势，这一句是两端的统一保险）。
       */}
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="归档这条想法（可以在下面的归档箱里找回来）"
-        hitSlop={8}
-        onPress={(event) => {
-          event.stopPropagation();
-          onArchive(idea.id);
-        }}>
-        <Ionicons name="archive-outline" size={18} color={theme.textSecondary} />
-      </Pressable>
+      {!selecting ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="归档这条想法（可以在下面的归档箱里找回来）"
+          hitSlop={8}
+          onPress={(event) => {
+            event.stopPropagation();
+            onArchive(idea.id);
+          }}>
+          <Ionicons name="archive-outline" size={18} color={theme.textSecondary} />
+        </Pressable>
+      ) : null}
     </Pressable>
   );
 }
@@ -369,4 +501,39 @@ const styles = StyleSheet.create({
     gap: Spacing.three,
     paddingVertical: Spacing.two,
   },
+  /**
+   * 多选模式下的选中方块（整行最左侧）。选中 = 实心填 tint + 勾；
+   * 没选中 = 空心描边。和任务行共用"方块代表选中"的语言（task-row 的 selectBox）。
+   */
+  ideaSelectBox: {
+    width: 22,
+    height: 22,
+    borderRadius: 6,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: Spacing.one,
+  },
+  /**
+   * 选择模式下的底部浮条（"已选 N · 删除"）。和 UndoBar 共用浮层定位，
+   * 但它是操作条不是提示条，所以单独一个样式：靠上、不叠在撤销条的位置。
+   */
+  selectBar: {
+    position: 'absolute',
+    left: Spacing.three,
+    right: Spacing.three,
+    bottom: BottomTabInset + Spacing.three,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+    borderRadius: Spacing.three,
+    shadowColor: '#000',
+    shadowOpacity: 0.16,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 6,
+  },
+  selectAction: { fontWeight: '600' },
 });

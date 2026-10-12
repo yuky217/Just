@@ -47,6 +47,17 @@ export interface TaskRowProps {
   expanded?: boolean;
   /** 点小三角。点整行仍然是进详情页，两件事不混 */
   onToggleExpand?: (task: Task) => void;
+  /**
+   * 是否处于多选模式。开启时：
+   * - 左侧的完成圈**换成选中框**（方框 + 勾），不并存两个圈 —— 两个圈并排会让人
+   *   分不清哪个是"做完了"、哪个是"选上了"。
+   * - 整行点击 = 切换选中（不进详情页）。完成时隐藏。
+   */
+  selecting?: boolean;
+  /** 本行是否已被选中 */
+  selected?: boolean;
+  /** 切换选中。只在 `selecting` 时由左侧控件与整行点击调用 */
+  onToggleSelect?: (task: Task) => void;
 }
 
 /** 展开器出现的门槛：两步以上。见 `children` 上的注释 */
@@ -62,9 +73,17 @@ export function TaskRow({
   children,
   expanded = false,
   onToggleExpand,
+  selecting = false,
+  selected = false,
+  onToggleSelect,
 }: TaskRowProps) {
   const theme = useTheme();
   const done = task.status === TaskStatus.Done;
+  // 选择模式下整行点击 = 切换选中，不进详情；完成时那一侧的"完成圈"也藏起来
+  const handleRowPress = () => {
+    if (selecting) onToggleSelect?.(task);
+    else onPress?.(task);
+  };
   // 行上显示的是"期限"（优先截止），不是"什么时候发生" —— 两者不同，见 taskDue 的注释
   const anchor = taskDue(task);
 
@@ -92,7 +111,7 @@ export function TaskRow({
 
   return (
     <Pressable
-      onPress={() => onPress?.(task)}
+      onPress={handleRowPress}
       // 长按交给外层拖拽手势，这里不抢
       style={({ pressed }) => [
         styles.row,
@@ -100,24 +119,43 @@ export function TaskRow({
           backgroundColor: pressed ? theme.backgroundSelected : theme.backgroundElement,
         },
       ]}>
-      <Pressable
-        accessibilityRole="checkbox"
-        accessibilityState={{ checked: done }}
-        accessibilityLabel={done ? '标记为未完成' : '标记为完成'}
-        onPress={() => onComplete?.(task)}
-        style={[
-          styles.checkbox,
-          {
-            borderColor: done ? theme.text : theme.textSecondary,
-            backgroundColor: done ? theme.text : 'transparent',
-          },
-        ]}>
-        {done ? (
-          <Animated.View style={iconStyle} pointerEvents="none">
+      {selecting ? (
+        <Pressable
+          accessibilityRole="checkbox"
+          accessibilityState={{ checked: selected }}
+          accessibilityLabel={selected ? '取消选择' : '选择'}
+          onPress={() => onToggleSelect?.(task)}
+          style={[
+            styles.selectBox,
+            {
+              borderColor: selected ? theme.tint : theme.textSecondary,
+              backgroundColor: selected ? theme.tint : 'transparent',
+            },
+          ]}>
+          {selected ? (
             <Ionicons name="checkmark" size={15} color={theme.background} />
-          </Animated.View>
-        ) : null}
-      </Pressable>
+          ) : null}
+        </Pressable>
+      ) : (
+        <Pressable
+          accessibilityRole="checkbox"
+          accessibilityState={{ checked: done }}
+          accessibilityLabel={done ? '标记为未完成' : '标记为完成'}
+          onPress={() => onComplete?.(task)}
+          style={[
+            styles.checkbox,
+            {
+              borderColor: done ? theme.text : theme.textSecondary,
+              backgroundColor: done ? theme.text : 'transparent',
+            },
+          ]}>
+          {done ? (
+            <Animated.View style={iconStyle} pointerEvents="none">
+              <Ionicons name="checkmark" size={15} color={theme.background} />
+            </Animated.View>
+          ) : null}
+        </Pressable>
+      )}
 
       <View style={styles.body}>
         <View style={styles.titleRow}>
@@ -190,18 +228,19 @@ export function TaskRow({
             {progress.done}/{progress.total}
           </ThemedText>
         ) : null}
-        {onDelete ? (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="删除"
-            hitSlop={6}
-            onPress={() => onDelete(task)}>
-            <Ionicons name="close" size={16} color={theme.textSecondary} />
-          </Pressable>
-        ) : onPress ? (
-          // 能点进详情时给一个方向暗示，而不是让用户猜这行能不能点
-          <Ionicons name="chevron-forward" size={16} color={theme.textSecondary} />
-        ) : null}
+        {!selecting &&
+          (onDelete ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="删除"
+              hitSlop={6}
+              onPress={() => onDelete(task)}>
+              <Ionicons name="close" size={16} color={theme.textSecondary} />
+            </Pressable>
+          ) : onPress ? (
+            // 能点进详情时给一个方向暗示，而不是让用户猜这行能不能点
+            <Ionicons name="chevron-forward" size={16} color={theme.textSecondary} />
+          ) : null)}
         {trailing}
       </View>
     </Pressable>
@@ -283,6 +322,18 @@ const styles = StyleSheet.create({
     width: 24,
     height: 24,
     borderRadius: 12,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  /**
+   * 多选模式下的选中框：**方形**（和完成圈的圆区分开 —— 两个圈并排会让人分不清
+   * 哪个是"做完了"、哪个是"选上了"）。选中时填 tint 蓝，和完成圈填 text 也分得开。
+   */
+  selectBox: {
+    width: 24,
+    height: 24,
+    borderRadius: 6,
     borderWidth: 1.5,
     alignItems: 'center',
     justifyContent: 'center',

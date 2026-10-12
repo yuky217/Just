@@ -51,6 +51,7 @@ import {
 } from '@/domain/habit-period';
 import type { Idea } from '@/domain/idea';
 import { planBreakdown } from '@/domain/idea-breakdown';
+import type { IdeaDeleteUndo, TaskDeleteUndo } from '@/domain/bulk-delete';
 import { advanceRepeatingTask } from '@/domain/repeat-next';
 import { buildSpanTime } from '@/domain/schedule-presets';
 import { desiredParentStatus } from '@/domain/subtask-progress';
@@ -154,6 +155,16 @@ interface AppState {
   /** 备份覆盖导入后重排全部提醒（旧通知还挂着、新通知没排） */
   resyncReminders: () => Promise<void>;
   removeTask: (id: string) => Promise<void>;
+  /**
+   * 批量删除任务，**返回撤销凭据**。
+   *
+   * 单条删除走 `removeTask`（详情页那颗删除按钮），这条路不需要撤销 ——
+   * 它有确认，而且一次只删一条，看错了也看得见。
+   * 批量是另一回事：一次删掉一整屏，看错一条就找不回来了。
+   */
+  removeTasks: (ids: readonly string[]) => Promise<TaskDeleteUndo>;
+  /** 撤销一次批量删除：任务回来、子任务挂回父任务、打卡记录与提醒一并还原 */
+  undoDeleteTasks: (undo: TaskDeleteUndo) => Promise<void>;
   archiveIdea: (id: string) => Promise<void>;
   /**
    * 归档箱。**不进 refresh()** —— 它是"偶尔翻一次"的地方，跟着每次勾任务
@@ -165,6 +176,9 @@ interface AppState {
   unarchiveIdea: (id: string) => Promise<void>;
   /** 真删一条想法（软删除）。只在归档箱里露出来：主列表上给"删除"太容易手滑。 */
   removeIdea: (id: string) => Promise<void>;
+  /** 批量删想法，返回撤销凭据 —— 同 `removeTasks`，一次删一屏就得留一条退路 */
+  removeIdeas: (ids: readonly string[]) => Promise<IdeaDeleteUndo>;
+  undoDeleteIdeas: (undo: IdeaDeleteUndo) => Promise<void>;
   /**
    * 把一条想法拆成"一条父任务 + N 条子任务"，返回父任务 id。
    *
@@ -544,6 +558,47 @@ export const useAppStore = create<AppState>((set, get) => ({
     await get().refresh();
   },
 
+  removeTasks: async (ids) => {
+    const list = [...ids];
+    // 删除时刻要先取：撤销打卡时拿它当"这次带走的"下界（见 TaskDeleteUndo.checkinSince）
+    const checkinSince = new Date().toISOString();
+    const parentLinks: { id: string; parentId: string }[] = [];
+    for (const id of list) {
+      /*
+       * 子任务先摘下来记一笔再解关系。
+       * 顺序不能反：解完关系就查不出"谁原本挂在它下面"了，
+       * 而撤销要的正是这条关系（见 TaskDeleteUndo.parentLinks）。
+       */
+      const kids = await taskRepository.listSubtasks(id);
+      for (const kid of kids) parentLinks.push({ id: kid.id, parentId: id });
+      await taskRepository.detachSubtasks(id);
+      await checkinRepository.softDeleteByTask(id);
+      await cancelTaskReminders(id);
+    }
+    await taskRepository.softDeleteMany(list);
+    await get().refresh();
+    return { kind: 'tasks', ids: list, parentLinks, checkinSince };
+  },
+
+  undoDeleteTasks: async (undo) => {
+    if (!undo.ids.length) return;
+    await taskRepository.restoreMany(undo.ids);
+    await taskRepository.restoreParentLinks(undo.parentLinks);
+    for (const id of undo.ids) {
+      await checkinRepository.restoreByTask(id, undo.checkinSince);
+    }
+    /*
+     * 提醒：删除时撤掉了，现在按当前数据重排这几条。
+     * 只对没完成的排 —— 对已完成的任务排提醒是个 bug，
+     * 而撤销并不改变完成态（删之前是完成，撤销回来还是完成）。
+     */
+    for (const id of undo.ids) {
+      const task = await taskRepository.getById(id);
+      if (task && task.status !== TaskStatus.Done) await scheduleTaskReminder(task);
+    }
+    await get().refresh();
+  },
+
   archiveIdea: async (id) => {
     await ideaRepository.archive(id);
     await get().refresh();
@@ -558,6 +613,19 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   removeIdea: async (id) => {
     await ideaRepository.softDelete(id);
+    await get().refresh();
+  },
+
+  removeIdeas: async (ids) => {
+    const list = [...ids];
+    await ideaRepository.softDeleteMany(list);
+    await get().refresh();
+    return { kind: 'ideas', ids: list };
+  },
+
+  undoDeleteIdeas: async (undo) => {
+    if (!undo.ids.length) return;
+    await ideaRepository.restoreMany(undo.ids);
     await get().refresh();
   },
 

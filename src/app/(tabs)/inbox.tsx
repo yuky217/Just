@@ -14,7 +14,8 @@ import {
 import { Screen } from '@/components/screen';
 import { SubtaskRow, TaskRow } from '@/components/task-row';
 import { ThemedText } from '@/components/themed-text';
-import { Spacing } from '@/constants/theme';
+import { UndoBar } from '@/components/undo-bar';
+import { BottomTabInset, Spacing } from '@/constants/theme';
 import { dayStripDays, dayStripIndexAt, type StripRect } from '@/domain/day-strip';
 import {
   buildSemanticTime,
@@ -27,6 +28,7 @@ import type { Task } from '@/domain/task';
 import { groupTodos, TODO_DONE_LIMIT, type TodoBucket } from '@/domain/todo';
 import { useTheme } from '@/hooks/use-theme';
 import { useAppStore } from '@/state/app-store';
+import type { TaskDeleteUndo } from '@/domain/bulk-delete';
 
 /**
  * 待办 = **「我手上欠着什么」的唯一入口**（2026-10-10 定型 + 改名）。
@@ -84,6 +86,8 @@ export default function InboxScreen() {
   const scheduleTask = useAppStore((state) => state.scheduleTask);
   const toggleSubtask = useAppStore((state) => state.setSubtaskDone);
   const loadSubtasksOfAction = useAppStore((state) => state.loadSubtasksOf);
+  const removeTasksAction = useAppStore((state) => state.removeTasks);
+  const undoDeleteTasksAction = useAppStore((state) => state.undoDeleteTasks);
   const [reordering, setReordering] = useState(false);
   /** 收起来的档。**默认全展开**（对的默认值 = 用户零操作） */
   const [collapsed, setCollapsed] = useState<TodoBucket[]>([]);
@@ -93,6 +97,43 @@ export default function InboxScreen() {
   const [childrenOf, setChildrenOf] = useState<Record<string, Task[]>>({});
   /** 长按原地松手时选中的那一条 —— 非空就弹语义词片 */
   const [arranging, setArranging] = useState<Task | null>(null);
+
+  /*
+    多选删除。一次只在一个档里选（「清掉这一档」是批量删除最常见的动机），
+    所以用一个 bucket 标记当前进入选择的是哪一档，而不是全局多选模式。
+  */
+  const [selectingBucket, setSelectingBucket] = useState<TodoBucket | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  /** 删除后拿到的撤销凭据；非空就显示底部撤销条 */
+  const [undoToken, setUndoToken] = useState<TaskDeleteUndo | null>(null);
+
+  const enterSelect = useCallback((bucket: TodoBucket) => {
+    setSelectingBucket(bucket);
+    setSelectedIds(new Set());
+  }, []);
+  const exitSelect = useCallback(() => {
+    setSelectingBucket(null);
+    setSelectedIds(new Set());
+  }, []);
+  const toggleSelect = useCallback((task: Task) => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(task.id)) next.delete(task.id);
+      else next.add(task.id);
+      return next;
+    });
+  }, []);
+  const deleteSelected = useCallback(() => {
+    if (!selectedIds.size) return;
+    void removeTasksAction([...selectedIds]).then((undo) => {
+      exitSelect();
+      setUndoToken(undo);
+    });
+  }, [selectedIds, removeTasksAction, exitSelect]);
+  const undoDelete = useCallback(() => {
+    if (!undoToken) return;
+    void undoDeleteTasksAction(undoToken).then(() => setUndoToken(null));
+  }, [undoToken, undoDeleteTasksAction]);
 
   /** 拖拽中浮在底部的日期条（只在拖拽时看得见） */
   const [barVisible, setBarVisible] = useState(false);
@@ -221,12 +262,44 @@ export default function InboxScreen() {
         </Pressable>
       }
       floating={
-        <DayDropBar
-          days={days}
-          hoverIndex={hoverIndex}
-          visible={barVisible}
-          onMeasure={handleBarMeasure}
-        />
+        <>
+          <DayDropBar
+            days={days}
+            hoverIndex={hoverIndex}
+            visible={barVisible}
+            onMeasure={handleBarMeasure}
+          />
+          {/*
+            多选删除的浮条。**不自动消失**：撤销机会被计时器吃掉 = 用户没法反悔。
+            - 选择中（有选中项）："已选 N · 删除"
+            - 删除后（undoToken 非空）："已删 N 条" + 「撤销」。两者互斥，先删后撤销。
+          */}
+          {selectingBucket !== null && selectedIds.size > 0 ? (
+            <View
+              style={[
+                styles.selectBar,
+                { backgroundColor: theme.backgroundElement },
+              ]}>
+              <ThemedText type="small" themeColor="text">
+                已选 {selectedIds.size}
+              </ThemedText>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="删除选中的任务"
+                onPress={deleteSelected}>
+                <ThemedText type="small" themeColor="tint" style={styles.selectAction}>
+                  删除
+                </ThemedText>
+              </Pressable>
+            </View>
+          ) : null}
+          <UndoBar
+            visible={undoToken !== null}
+            count={undoToken ? undoToken.ids.length : 0}
+            onUndo={undoDelete}
+            onDismiss={() => setUndoToken(null)}
+          />
+        </>
       }>
       {groups.length ? (
         groups.map((group) => {
@@ -257,6 +330,27 @@ export default function InboxScreen() {
                   size={14}
                   color={theme.textSecondary}
                 />
+                {selectingBucket === group.bucket ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="取消选择"
+                    onPress={exitSelect}
+                    hitSlop={6}>
+                    <ThemedText type="small" themeColor="tint">
+                      取消
+                    </ThemedText>
+                  </Pressable>
+                ) : (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`选择 ${group.title} 里的任务`}
+                    onPress={() => enterSelect(group.bucket)}
+                    hitSlop={6}>
+                    <ThemedText type="small" themeColor="textSecondary">
+                      选择
+                    </ThemedText>
+                  </Pressable>
+                )}
               </Pressable>
 
               {open ? (
@@ -294,6 +388,10 @@ export default function InboxScreen() {
                           onComplete={guarded((t) =>
                             isDoneGroup ? void reopenTask(t.id) : void completeTask(t.id),
                           )}
+                          // 这一档进入选择模式时，本行切换成选中态（左侧方框、整行点选）
+                          selecting={selectingBucket === group.bucket}
+                          selected={selectedIds.has(task.id)}
+                          onToggleSelect={toggleSelect}
                         />
                         {open && kids.length ? (
                           <View style={styles.children}>
@@ -367,4 +465,26 @@ const styles = StyleSheet.create({
   more: { paddingTop: Spacing.one, fontSize: 12 },
   /** 展开出来的几步：整块跟着父任务那一行，不另起一张卡 */
   children: { gap: Spacing.one, paddingTop: Spacing.one },
+  /**
+   * 选择模式下的底部浮条（"已选 N · 删除"）。和 UndoBar 共用浮层定位，
+   * 但它是操作条不是提示条，所以单独一个样式：更靠上、不叠在撤销条的位置。
+   */
+  selectBar: {
+    position: 'absolute',
+    left: Spacing.three,
+    right: Spacing.three,
+    bottom: BottomTabInset + Spacing.three,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+    borderRadius: Spacing.three,
+    shadowColor: '#000',
+    shadowOpacity: 0.16,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 6,
+  },
+  selectAction: { fontWeight: '600' },
 });

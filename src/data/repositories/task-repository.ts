@@ -244,6 +244,56 @@ export const taskRepository = {
     );
   },
 
+  /**
+   * 批量软删（一次删除多条）。
+   *
+   * 逐条跑同一个 UPDATE 而不是拼 `WHERE id IN (...)`：条数本来就不多
+   * （人一次能选的数量有限），而拼 SQL 要自己处理占位符个数，
+   * 不如让循环去承担这点开销。
+   */
+  async softDeleteMany(ids: readonly string[]): Promise<void> {
+    for (const id of ids) {
+      await this.softDelete(id);
+    }
+  },
+
+  /**
+   * 批量恢复（撤销删除）。
+   *
+   * ⭐ 刻意用 `deleted_at = NULL` 而不是"把原来的值写回去"：
+   * 软删列只在"有没有删"这一件事上有含义，什么时候删的没人看。
+   * 真要保留删除时间，那是一个新字段的事，不是复用这一列。
+   */
+  async restoreMany(ids: readonly string[]): Promise<void> {
+    const db = await getDatabase();
+    const now = new Date().toISOString();
+    for (const id of ids) {
+      await db.runAsync(
+        `UPDATE ${TABLE} SET deleted_at = NULL, updated_at = ? WHERE id = ?`,
+        [now, id],
+      );
+    }
+  },
+
+  /**
+   * 撤销删除时把子任务重新挂回父任务。
+   *
+   * 为什么需要它：`removeTask` 走的是 `detachSubtasks`（解除关系，不是删）——
+   * 删掉父任务本来就不该连带删掉用户拆出来的步骤，这是刻意的。
+   * 但**撤销**的语义是"回到删除前"，那时这些步骤还挂在父任务下面，
+   * 所以撤销必须能把关系挂回去，否则撤销出来的父子是散的。
+   */
+  async restoreParentLinks(links: readonly { id: string; parentId: string }[]): Promise<void> {
+    const db = await getDatabase();
+    const now = new Date().toISOString();
+    for (const link of links) {
+      await db.runAsync(
+        `UPDATE ${TABLE} SET parent_task_id = ?, updated_at = ? WHERE id = ?`,
+        [link.parentId, now, link.id],
+      );
+    }
+  },
+
   async countOpen(): Promise<number> {
     const db = await getDatabase();
     const row = await db.getFirstAsync<{ n: number }>(
