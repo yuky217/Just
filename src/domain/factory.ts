@@ -156,11 +156,15 @@ function defaultCompletion(kind: TaskKind, input: CreateTaskInput): CompletionRu
   return CompletionRule.Check;
 }
 
-export function createIdea(content: string, source: CaptureSource = CaptureSource.Manual): Idea {
+export function createIdea(
+  content: string,
+  source: CaptureSource = CaptureSource.Manual,
+  tags: string[] = [],
+): Idea {
   return {
     ...createBase('idea'),
     content: content.trim(),
-    tags: [],
+    tags,
     source,
     archivedAt: null,
     breakdownTaskId: null,

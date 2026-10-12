@@ -3,6 +3,7 @@ import { taskRepository } from '@/data/repositories/task-repository';
 import { CaptureSource } from '@/domain/enums';
 import type { TaskKind } from '@/domain/enums';
 import { createIdea, createTask } from '@/domain/factory';
+import { parseIdeaTags } from '@/domain/idea';
 import { decideRoute, type CaptureRoute } from '@/domain/routing';
 import { parseSchedule, type ParsedSchedule } from '@/domain/parse-schedule';
 import { resolveReminderMinutes } from '@/domain/reminder';
@@ -98,8 +99,13 @@ export async function quickCapture(input: QuickCaptureInput): Promise<QuickCaptu
      * 想法库的 content 是**用户输入的那段原文**，一字不改。
      * 不能拿解析后的 title/note：那是给任务用的"提炼 + 抠掉时间地点"，
      * 想法不排时间、也没有地点字段，抠掉任何一个字都是白丢信息。
+     *
+     * 唯一例外是 `#标签`：它从正文里摘出来变成结构化字段（想法页上以 chip 展示、
+     * 可点筛选），留在正文里只会造成重复。摘完若正文空了就退回原文，
+     * 不存一条空白想法。
      */
-    const idea = createIdea(text, source);
+    const { content, tags } = parseIdeaTags(text);
+    const idea = createIdea(content, source, tags);
     await ideaRepository.create(idea);
     return {
       id: idea.id,

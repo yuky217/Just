@@ -8,6 +8,7 @@ import { CaptureInput } from '@/components/capture-input';
 import { EmptyState } from '@/components/empty-state';
 import { BreakdownSheet } from '@/components/breakdown-sheet';
 import { IdeaBreakdownSheet } from '@/components/idea-breakdown-sheet';
+import { TagEditorSheet } from '@/components/tag-editor-sheet';
 import { isCapabilityReady, suggestBreakdown } from '@/capabilities/client';
 import { AiCapability } from '@/capabilities/types';
 import { Screen } from '@/components/screen';
@@ -53,6 +54,7 @@ export default function IdeasScreen() {
   const removeIdea = useAppStore((state) => state.removeIdea);
   const removeIdeasAction = useAppStore((state) => state.removeIdeas);
   const undoDeleteIdeasAction = useAppStore((state) => state.undoDeleteIdeas);
+  const saveIdea = useAppStore((state) => state.saveIdea);
 
   const [keyword, setKeyword] = useState('');
   /** 正在拆的那条想法（null = 面板没开） */
@@ -64,6 +66,26 @@ export default function IdeasScreen() {
   const [selectingIdeas, setSelectingIdeas] = useState(false);
   const [selectedIdeaIds, setSelectedIdeaIds] = useState<Set<string>>(new Set());
   const [ideaUndoToken, setIdeaUndoToken] = useState<IdeaDeleteUndo | null>(null);
+
+  /*
+    标签：① 正在编辑标签的那条想法（null = 面板没开）；② 当前按哪个标签在筛。
+    两者互不干扰 —— 筛选是看，编辑是改。
+  */
+  const [editingIdea, setEditingIdea] = useState<Idea | null>(null);
+  const [activeTag, setActiveTag] = useState<string | null>(null);
+
+  const openTagEditor = useCallback((idea: Idea) => setEditingIdea(idea), []);
+  const closeTagEditor = useCallback(() => setEditingIdea(null), []);
+  const handleSaveTags = useCallback(
+    (tags: string[]) => {
+      const target = editingIdea;
+      setEditingIdea(null);
+      if (target) void saveIdea({ ...target, tags });
+    },
+    [editingIdea, saveIdea],
+  );
+  const filterByTag = useCallback((tag: string) => setActiveTag(tag), []);
+  const clearFilter = useCallback(() => setActiveTag(null), []);
 
   const enterSelectIdeas = useCallback(() => {
     setSelectingIdeas(true);
@@ -116,6 +138,21 @@ export default function IdeasScreen() {
     }
     return map;
   }, [tasks]);
+
+  /**
+   * 整个想法库里出现过的标签，按使用次数降序 —— 给标签编辑面板做联想用。
+   * 现算（不查库）：`ideas` 已经在内存里，标签又少，没必要为它再开一条查询。
+   */
+  const allTags = useMemo(() => {
+    const count = new Map<string, number>();
+    for (const idea of ideas) {
+      for (const tag of idea.tags) {
+        const key = tag.toLowerCase();
+        count.set(key, (count.get(key) ?? 0) + 1);
+      }
+    }
+    return [...count.entries()].sort((a, b) => b[1] - a[1]).map(([t]) => t);
+  }, [ideas]);
 
   /** 已拆出来的那条父任务。父任务被删掉时当作"没拆过"—— 否则点进去是一片空白 */
   const parentOf = useCallback(
@@ -170,9 +207,19 @@ export default function IdeasScreen() {
 
   const visible = useMemo(() => {
     const k = keyword.trim().toLowerCase();
-    if (!k) return ideas;
-    return ideas.filter((idea) => idea.content.toLowerCase().includes(k));
-  }, [ideas, keyword]);
+    return ideas.filter((idea) => {
+      // 标签筛选：点了一个标签就只看带它的
+      if (activeTag && !idea.tags.includes(activeTag)) return false;
+      // 关键词：正文或标签里出现都算（和全库搜索口径一致）
+      if (k) {
+        const hit =
+          idea.content.toLowerCase().includes(k) ||
+          idea.tags.some((t) => t.toLowerCase().includes(k));
+        if (!hit) return false;
+      }
+      return true;
+    });
+  }, [ideas, keyword, activeTag]);
 
   return (
     <Screen
@@ -282,15 +329,44 @@ export default function IdeasScreen() {
                 onToggleSelect={toggleSelectIdea}
                 onOpen={() => openIdea(idea)}
                 onArchive={(id) => void archiveIdea(id)}
+                onTagTap={filterByTag}
+                onEditTags={() => openTagEditor(idea)}
               />
             );
           })}
         </View>
-      ) : (
+      ) : null}
+
+      {/*
+        正在按标签筛选时，列表上方给一条可清除的筛选条。
+        点筛选条本身 = 取消筛选；它和搜索框是两套正交的过滤，互不覆盖。
+      */}
+      {activeTag ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`取消按标签「${activeTag}」筛选`}
+          onPress={clearFilter}
+          style={[
+            styles.filterBar,
+            { backgroundColor: theme.backgroundElement, borderColor: theme.backgroundSelected },
+          ]}>
+          <Ionicons name="pricetag-outline" size={14} color={theme.tint} />
+          <ThemedText type="small" themeColor="tint">
+            {activeTag}
+          </ThemedText>
+          <Ionicons name="close" size={14} color={theme.textSecondary} />
+        </Pressable>
+      ) : null}
+
+      {/*
+        空态。原本放在 visible.length 为假时渲染，但筛选/搜索都可能让列表变空，
+        所以单独判断：要么"库本来就是空的"，要么"当前过滤条件下没有匹配"。
+      */}
+      {visible.length ? null : (
         <EmptyState
           icon="bulb-outline"
-          title={keyword ? '没找到相关想法' : '想法库还是空的'}
-          hint={keyword ? '换个说法试试' : '随手记一句，将来的你会感谢现在的你'}
+          title={keyword || activeTag ? '没有匹配的想法' : '想法库还是空的'}
+          hint={keyword || activeTag ? '换个说法或清掉筛选' : '随手记一句，将来的你会感谢现在的你'}
         />
       )}
 
@@ -378,6 +454,18 @@ export default function IdeasScreen() {
           }}
         />
       )}
+
+      {/*
+        标签编辑面板。它是 Modal，挂在哪都不影响层级，放最后即可。
+        allTags 是整库标签联想；保存走 store.saveIdea（落库 + 刷新，列表 chip 立即变）。
+      */}
+      <TagEditorSheet
+        visible={editingIdea !== null}
+        idea={editingIdea}
+        allTags={allTags}
+        onSave={handleSaveTags}
+        onClose={closeTagEditor}
+      />
     </Screen>
   );
 }
@@ -390,6 +478,8 @@ function IdeaRow({
   onToggleSelect,
   onOpen,
   onArchive,
+  onTagTap,
+  onEditTags,
 }: {
   idea: Idea;
   /** 已经拆出来的步数（0 = 还没拆） */
@@ -402,6 +492,10 @@ function IdeaRow({
   onToggleSelect?: (idea: Idea) => void;
   onOpen: () => void;
   onArchive: (id: string) => void;
+  /** 点标签 chip = 按这个标签筛选 */
+  onTagTap?: (tag: string) => void;
+  /** 点「＋标签」= 打开编辑面板 */
+  onEditTags?: () => void;
 }) {
   const theme = useTheme();
   const handlePress = () => {
@@ -441,6 +535,58 @@ function IdeaRow({
       ) : null}
       <View style={styles.ideaBody}>
         <ThemedText numberOfLines={5}>{idea.content}</ThemedText>
+
+        {/*
+          标签 chip 行。有标签就显示 chip + 末尾「＋」加标；没有标签就只显示「＋ 标签」入口。
+          多选模式下整行是"选择"语义，标签不再可点（既不筛选也不编辑），只作展示。
+        */}
+        {idea.tags.length ? (
+          <View style={styles.tagRow}>
+            {idea.tags.map((tag) => (
+              <Pressable
+                key={tag}
+                accessibilityRole="button"
+                accessibilityLabel={`按标签「${tag}」筛选`}
+                disabled={selecting}
+                onPress={(event) => {
+                  event.stopPropagation();
+                  onTagTap?.(tag);
+                }}
+                style={[styles.tagChip, { borderColor: theme.backgroundSelected }]}>
+                <ThemedText type="small" themeColor="textSecondary">
+                  {tag}
+                </ThemedText>
+              </Pressable>
+            ))}
+            {!selecting ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="添加标签"
+                onPress={(event) => {
+                  event.stopPropagation();
+                  onEditTags?.();
+                }}
+                style={[styles.tagChip, styles.tagAdd, { borderColor: theme.tint }]}>
+                <Ionicons name="add" size={14} color={theme.tint} />
+              </Pressable>
+            ) : null}
+          </View>
+        ) : (
+          !selecting ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="添加标签"
+              onPress={(event) => {
+                event.stopPropagation();
+                onEditTags?.();
+              }}>
+              <ThemedText type="small" themeColor="tint">
+                ＋ 标签
+              </ThemedText>
+            </Pressable>
+          ) : null
+        )}
+
         <ThemedText type="small" themeColor="textSecondary" style={styles.ideaMeta}>
           {formatMonthDay(new Date(idea.createdAt))} 记下
           {stepCount ? ` · 已拆成 ${stepCount} 步` : ''}
@@ -488,6 +634,31 @@ const styles = StyleSheet.create({
   },
   ideaBody: { flex: 1, gap: Spacing.one },
   ideaMeta: { fontSize: 12 },
+  /**
+   * 标签 chip 行：换行排，跟在正文下面、日期上面。
+   * chip 本体是描边小胶囊；末尾「＋」同款样式但用 tint 描边，点开编辑面板。
+   */
+  tagRow: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.one, marginTop: Spacing.one },
+  tagChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: Spacing.two,
+    paddingVertical: 3,
+    borderRadius: Spacing.two,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  tagAdd: { paddingHorizontal: Spacing.two },
+  /** 按标签筛选时的可清除筛选条（列表上方） */
+  filterBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: Spacing.one,
+    paddingHorizontal: Spacing.two,
+    paddingVertical: Spacing.one,
+    borderRadius: Spacing.two,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
   archiveToggle: {
     flexDirection: 'row',
     alignItems: 'center',

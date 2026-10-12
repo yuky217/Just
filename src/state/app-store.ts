@@ -179,6 +179,8 @@ interface AppState {
   /** 批量删想法，返回撤销凭据 —— 同 `removeTasks`，一次删一屏就得留一条退路 */
   removeIdeas: (ids: readonly string[]) => Promise<IdeaDeleteUndo>;
   undoDeleteIdeas: (undo: IdeaDeleteUndo) => Promise<void>;
+  /** 改一条想法（目前只用于编辑标签）：落库后整库刷新，让列表里的 chip 立即更新 */
+  saveIdea: (idea: Idea) => Promise<void>;
   /**
    * 把一条想法拆成"一条父任务 + N 条子任务"，返回父任务 id。
    *
@@ -626,6 +628,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   undoDeleteIdeas: async (undo) => {
     if (!undo.ids.length) return;
     await ideaRepository.restoreMany(undo.ids);
+    await get().refresh();
+  },
+
+  saveIdea: async (idea) => {
+    await ideaRepository.save(idea);
     await get().refresh();
   },
 

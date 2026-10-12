@@ -132,11 +132,15 @@ describe('quickCapture：粘一整段通知', () => {
     expect(new Date(time.startAt).getDate()).toBe(20); // 手动的压过识别的
   });
 
-  it('标成灵感时，想法库拿到的是一字不改的全文', async () => {
+  it('标成灵感时，正文除 #标签 外一字不改', async () => {
     await quickCapture({ text: NOTICE, markedAsInspiration: true });
     const idea = written[0]!;
+    // 井号语法之外的内容原样保留
+    expect(String(idea.content)).toContain('各位委员、部长、干事');
     expect(String(idea.content)).toContain('地点："一站式"学生社区211');
-    expect(String(idea.content)).toContain('关于团委大会暨团委素质拓展活动开展通知');
+    // NOTICE 第一行 "#关于团委大会暨团委素质拓展活动开展通知" 按井号语法被抽成标签
+    expect(String(idea.content)).not.toContain('关于团委大会暨团委素质拓展活动开展通知');
+    expect((idea.tags as string[])).toContain('关于团委大会暨团委素质拓展活动开展通知');
   });
 
   /*
@@ -175,5 +179,34 @@ describe('quickCapture：粘一整段通知', () => {
     expect(written[0]!.reminderMinutesBefore).toBe(60);
     const time = written[0]!.time as { startAt: string };
     expect(new Date(time.startAt).getDate()).toBe(9);
+  });
+});
+
+describe('quickCapture：想法带 #标签', () => {
+  beforeEach(() => {
+    written.length = 0;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 9, 7, 10, 0, 0));
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it('记灵感写 #标签 → 落进 idea.tags，正文不含标签', async () => {
+    await quickCapture({ text: '买菜 #生活 #周末', markedAsInspiration: true });
+    const idea = written.find((w) => 'tags' in w) as Record<string, unknown>;
+    expect(idea).toBeDefined();
+    expect(String(idea.content)).toBe('买菜');
+    expect(idea.tags).toEqual(['生活', '周末']);
+  });
+
+  it('重复的标签只留一个', async () => {
+    await quickCapture({ text: '读书 #学习 #学习', markedAsInspiration: true });
+    const idea = written.find((w) => 'tags' in w) as Record<string, unknown>;
+    expect(idea.tags).toEqual(['学习']);
+  });
+
+  it('标签里多余的前置 # 会被去掉', async () => {
+    await quickCapture({ text: '读书 ##精读', markedAsInspiration: true });
+    const idea = written.find((w) => 'tags' in w) as Record<string, unknown>;
+    expect(idea.tags).toEqual(['精读']);
   });
 });
