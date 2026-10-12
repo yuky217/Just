@@ -12,7 +12,7 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 
-import { CalendarDay, type EventSlot } from '@/components/calendar-day';
+import { CalendarDay, type EventSlot, type PendingMove } from '@/components/calendar-day';
 import { CalendarMonth } from '@/components/calendar-month';
 import { CalendarWeek } from '@/components/calendar-week';
 import { Card } from '@/components/card';
@@ -58,14 +58,14 @@ import {
 import { buildMonthPlan } from '@/domain/month-plan';
 import { parseSchedule } from '@/domain/parse-schedule';
 import { buildPlacedTime, buildRetimedSpanTime, buildRetimedTime, buildTimeOnDay } from '@/domain/schedule-presets';
-import { NO_TIME, taskAnchor, type Task } from '@/domain/task';
+import { NO_TIME, taskAnchor, type Task, type TaskTime } from '@/domain/task';
 import { isMuted, taskDisplayState } from '@/domain/task-state';
 import { groupTodos } from '@/domain/todo';
 import { useCrossDayDrag, type CrossDayDragGesture } from '@/hooks/use-cross-day-drag';
 import { useTheme } from '@/hooks/use-theme';
 import { useAppStore } from '@/state/app-store';
 import { useSettings } from '@/state/settings-store';
-import { toDate } from '@/utils/datetime';
+import { formatMinutes, toDate } from '@/utils/datetime';
 
 /**
  * 日历：只呈现"有明确时间"的事。
@@ -869,23 +869,60 @@ export default function CalendarScreen() {
     [saveCourse],
   );
 
-  /** 日视图拖块改时刻：把分钟数写回实体（保持任务原本的时间属性） */
+  /* ---------------- 改期要确认（2026-10-12） ---------------- */
+
+  /**
+   * 拖一下就把时间改掉太容易了：手指在块上划一道、松手即落库，
+   * 事后才发觉是滚页面时蹭到的。所以松手**不写库**，只把结果摆出来（块半透明），
+   * 底部浮条上点「改好」才算数。
+   *
+   * 为什么不用弹窗：弹窗挡住日历，而"改到哪儿了"正是要在日历上看的。
+   * 为什么不做成"先改、再给撤销"：撤销要用户先发现自己改错了再回头找，
+   * 而确认只要一次点击、且**取消等于什么都没发生**。
+   */
+  const [pending, setPending] = useState<{ task: Task; time: TaskTime; move: PendingMove } | null>(
+    null,
+  );
+
+  /** 日视图拖块改时刻：保持任务原本的时间属性，只挪开始（时长照旧） */
   const handleRetime = useCallback(
-    async (task: Task, minutesOfDay: number) => {
-      const time = buildRetimedTime(task, minutesOfDay);
-      if (time) await scheduleTask(task.id, time);
+    (task: Task, startMinutes: number, endMinutes: number) => {
+      const time = buildRetimedTime(task, startMinutes);
+      if (!time) return;
+      setPending({ task, time, move: { taskId: task.id, start: startMinutes, end: endMinutes } });
     },
-    [scheduleTask],
+    [],
   );
 
   /** 日视图拽上下边改时段：始末一起写回（从此有了 endAt，块的高度就真实了） */
   const handleResize = useCallback(
-    async (task: Task, startMinutes: number, endMinutes: number) => {
+    (task: Task, startMinutes: number, endMinutes: number) => {
       const time = buildRetimedSpanTime(task, startMinutes, endMinutes);
-      if (time) await scheduleTask(task.id, time);
+      if (!time) return;
+      setPending({ task, time, move: { taskId: task.id, start: startMinutes, end: endMinutes } });
     },
-    [scheduleTask],
+    [],
   );
+
+  /** 浮条上点「改好」：到这一步才真写库 */
+  const confirmPending = useCallback(() => {
+    if (!pending) return;
+    const { task, time } = pending;
+    setPending(null);
+    void scheduleTask(task.id, time);
+  }, [pending, scheduleTask]);
+
+  const cancelPending = useCallback(() => setPending(null), []);
+
+  /**
+   * 换了视图或翻了页，那次待确认就没意义了 —— 浮条挂在这儿会指向一个
+   * 已经看不见的块。直接丢掉（等于取消，不会误改数据）。
+   */
+  useEffect(() => {
+    setPending(null);
+    // 只认"视图"和"哪一天"，selected 每次渲染都是新对象
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, dayKey(selected)]);
 
   const busyDragging = draggingTask !== null || timelineDragging;
 
@@ -1091,7 +1128,11 @@ export default function CalendarScreen() {
             刻意**不给它一个"点空白就建"的替代**：时间轴上的空白既属于滚动、
             又属于翻页，再塞第三种含义进去，三者会互相打架。
           */}
-          {mode === 'timetable' ? null : (
+          {/*
+            「＋」和改期确认条在同一条底线上（都在待办把手上方），窄屏上会压在一起，
+            所以**有待确认的改期时「＋」让位** —— 这一刻用户眼里只有"改不改"这件事。
+          */}
+          {mode === 'timetable' || pending ? null : (
             <View style={styles.fabLayer} pointerEvents="box-none">
               <Fab onPress={openNewSpan} accessibilityLabel="新建日程" />
             </View>
@@ -1107,6 +1148,46 @@ export default function CalendarScreen() {
             onCancel={() => setNewSpan(null)}
             onSubmit={submitNewSpan}
           />
+
+          {/*
+            改期确认（2026-10-12）：拖完松手**不落库**，块停在半透明的新位置上，
+            这一条浮条是唯一的确认入口。**取消 = 什么都没发生**，不用记着原来是多少
+            再改回去。摆在待办把手正上方 —— 屏底那一块已经有主人在了。
+          */}
+          {pending ? (
+            <View style={styles.confirmLayer} pointerEvents="box-none">
+              <View style={[styles.confirmCard, { backgroundColor: theme.text }]}>
+                <ThemedText
+                  type="small"
+                  numberOfLines={1}
+                  style={[styles.confirmText, { color: theme.background }]}>
+                  {`改到 ${formatMinutes(pending.move.start)}–${formatMinutes(pending.move.end)}？`}
+                </ThemedText>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="不改了"
+                  onPress={cancelPending}
+                  hitSlop={8}>
+                  <ThemedText type="small" style={{ color: theme.background }}>
+                    取消
+                  </ThemedText>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="确认改到这个时间"
+                  onPress={confirmPending}
+                  hitSlop={8}>
+                  {/* 主按钮只靠字重区分，颜色跟着卡片底色走 ——
+                      写死一个"浅色"在深色主题下会变成浅底浅字 */}
+                  <ThemedText
+                    type="small"
+                    style={{ color: theme.background, fontWeight: '600' }}>
+                    改好
+                  </ThemedText>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
         </>
       }>
       <View ref={containerRef} style={styles.container} collapsable={false}>
@@ -1325,6 +1406,7 @@ export default function CalendarScreen() {
                     onResize={handleResize}
                     onDraggingChange={setTimelineDragging}
                     onCreateSpan={openSpanOnSelectedDay}
+                    pendingMove={pending?.move ?? null}
                   />
                 </>
               ) : null}
@@ -1558,6 +1640,28 @@ const styles = StyleSheet.create({
     position: 'absolute',
     right: Spacing.three,
     bottom: BottomTabInset + PANEL_HANDLE_HEIGHT + Spacing.two,
+  },
+  /** 改期确认条：与「＋」同一条底线（都在待办把手上方），横着铺开所以居中 */
+  confirmLayer: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: BottomTabInset + PANEL_HANDLE_HEIGHT + Spacing.two,
+    alignItems: 'center',
+    paddingHorizontal: Spacing.three,
+  },
+  confirmCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.three,
+    maxWidth: 460,
+    borderRadius: 14,
+    paddingVertical: Spacing.two,
+    paddingHorizontal: Spacing.three,
+  },
+  /** 时刻可能长，让它先被压掉，别把「改好」挤出屏幕 */
+  confirmText: {
+    flexShrink: 1,
   },
   /**
    * 工具栏：加了「待办」之后分段变五个，窄屏上一行放不下

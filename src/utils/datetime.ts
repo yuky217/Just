@@ -58,6 +58,20 @@ export const formatDayTime = (iso: string | null | undefined): string =>
   iso ? format(new Date(iso), 'M月d日 HH:mm') : '';
 
 /**
+ * "当天第几分钟" → "14:30"。
+ *
+ * 日视图的块、改期确认条都要写这个，各写一份迟早一处显示 24:00、另一处显示 00:00
+ * （分钟数越界时最容易露馅），所以收在这里。超过 24 小时按取模卷回来 ——
+ * 界面上"几点"永远是对的，越界是上游该管的事。
+ */
+export const formatMinutes = (minutes: number): string => {
+  // 钳到当天最后一分钟：越界的分钟数（23:45 的半小时块会算出 1455）
+  // 既不能显示成 "24:15"，更不能取模绕回 "00:15"（看着比开始时间还早）
+  const total = Math.max(0, Math.min(24 * 60 - 1, Math.round(minutes)));
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+};
+
+/**
  * 'YYYY-MM-DD' → 本地当天 00:00。
  * 刻意不用 `new Date('2026-10-06')`：那样会按 UTC 解析，东八区会偏移成前一天早上。
  */

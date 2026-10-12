@@ -94,9 +94,14 @@ export function describeRepeat(rule: RepeatRule): string {
       sorted.every((d, i) => d === i + 1);
     if (isWorkweek) return '工作日';
     const label = sorted.map((d) => `周${WEEKDAY_CN[d]}`).join('、');
-    return n > 1 ? `每 ${n} 周 · ${label}` : `每${label}`;
+    return n > 1 ? `${everyNWeeks(n)} · ${label}` : `每${label}`;
   }
-  return n > 1 ? `每 ${n} 周` : '每周';
+  return n > 1 ? everyNWeeks(n) : '每周';
+}
+
+/** 两周一次说"隔周"，比"每 2 周"更像人话；再往上才回到数字 */
+function everyNWeeks(n: number): string {
+  return n === 2 ? '隔周' : `每 ${n} 周`;
 }
 
 /**
@@ -168,6 +173,15 @@ export const REPEAT_PRESETS: readonly RepeatPreset[] = [
     rule: { freq: 'weekly', interval: 1, byWeekday: [1, 2, 3, 4, 5] },
   },
   { id: 'weekly', label: '每周', rule: { freq: 'weekly', interval: 1 } },
+  /**
+   * 隔周 = 每两周一次，"这周有、下周没有"。
+   *
+   * 刻意只做这一种：**任务没有"第几周"可依** —— 课表的单双周是"学期第几周"的奇偶，
+   * 有 `course_sessions.weeks` 撑着；重复任务只有一根时间轴，没有学期、没有校历，
+   * 硬做"单周 / 双周"就只能凭某个私下定的基准周去数，用户没法验算。
+   * 而"隔周开组会"这种真实说法落到规则上就是 weekly + interval 2，一眼能看懂。
+   */
+  { id: 'biweekly', label: '隔周', rule: { freq: 'weekly', interval: 2 } },
   { id: 'monthly', label: '每月', rule: { freq: 'monthly', interval: 1 } },
   { id: 'yearly', label: '每年', rule: { freq: 'yearly', interval: 1 } },
 ];

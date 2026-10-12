@@ -18,7 +18,7 @@ import { layoutLanes } from '@/domain/lane-layout';
 import { isMuted, taskDisplayState } from '@/domain/task-state';
 import { isAllDay, type Task } from '@/domain/task';
 import { useTheme } from '@/hooks/use-theme';
-import { describeDue, formatTime } from '@/utils/datetime';
+import { describeDue, formatMinutes, formatTime } from '@/utils/datetime';
 /**
  * 日视图：纵向小时刻度 + 任务块。
  *
@@ -71,11 +71,25 @@ export interface CalendarDayProps {
   onSelectTask: (task: Task) => void;
   onCompleteTask?: (task: Task) => void;
   /** 拖动改时刻（当天第几分钟）。返回 Promise 时会被 await，等数据落库后再收尾 */
-  onRetime?: (task: Task, minutesOfDay: number) => Promise<void> | void;
+  /**
+   * 拖整块改时刻（当天第几分钟）。**连结束一起给** —— 时长是块原本的时长，
+   * 这一层算，父层不必再自己"按原时长补一个结束"（那要重复"没 endAt 按半小时"的口径）。
+   * 返回 Promise 时会被 await。
+   */
+  onRetime?: (task: Task, startMinutes: number, endMinutes: number) => Promise<void> | void;
   /** 拽上下边改时段（始末两个刻度）。返回 Promise 时会被 await */
   onResize?: (task: Task, startMinutes: number, endMinutes: number) => Promise<void> | void;
   /** 拖拽开始 / 结束：父层用它临时关掉页面滚动 */
   onDraggingChange?: (dragging: boolean) => void;
+  /**
+   * 改期**还没确认**的那一次预览：块按它画，但一个字都没写进库。
+   *
+   * 拖一下就把时间改掉太容易了 —— 手指在块上划一道，松手即落库，事后才发觉
+   * 是滚页面时蹭到的。现在松手只"摆"出结果（半透明，跟草稿块一个语言），
+   * 由底部浮条上明确的「改好」才真写库。**取消等于什么都没发生**，
+   * 不用记着"原来是多少"再改回去。
+   */
+  pendingMove?: PendingMove | null;
   /**
    * 在时间轴**空白处**长按拖出一个时段 → 新建一条日程（2026-10-10）。
    *
@@ -86,6 +100,14 @@ export interface CalendarDayProps {
    * 这一层只负责"把用户圈出来的那段时间变成两个数"。
    */
   onCreateSpan?: (startMinutes: number, endMinutes: number) => void;
+}
+
+/** 待确认的改期（由父层持有，日视图只负责按它画） */
+export interface PendingMove {
+  taskId: string;
+  /** 当天第几分钟 —— 起止都给，块上的时刻文字要跟着一起变 */
+  start: number;
+  end: number;
 }
 
 /** 考试画进时间轴需要的三个数（父层已经从 CalEvent 换算好） */
@@ -112,8 +134,6 @@ const snap = (minutes: number): number => {
   return Math.max(0, Math.min(LAST_SLOT_MINUTES, snapped));
 };
 
-const formatMinutes = (minutes: number): string =>
-  `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
 
 interface Block {
   task: Task;
@@ -124,6 +144,8 @@ interface Block {
   /** 块的始末（当天分钟数）—— 边缘拖拽要在这两个数上做文章 */
   start: number;
   end: number;
+  /** 画的是"待确认"的新位置，不是库里的时间 */
+  pending?: boolean;
 }
 
 /** 块的结束分钟：有 endAt 用 endAt（跨天结束画到当天末尾），没有按半小时 */
@@ -149,6 +171,7 @@ export function CalendarDay({
   onResize,
   onDraggingChange,
   onCreateSpan,
+  pendingMove = null,
 }: CalendarDayProps) {
   const theme = useTheme();
   const scrollRef = useRef<ScrollView>(null);
@@ -292,10 +315,12 @@ export function CalendarDay({
 
   const blocks = useMemo<Block[]>(() => {
     const spans = timed.map((task) => {
-      const start = minutesOfDay(task.time.startAt!);
-      return { task, start, end: endMinutesOf(task, start) };
+      const preview = pendingMove?.taskId === task.id ? pendingMove : null;
+      const start = preview ? preview.start : minutesOfDay(task.time.startAt!);
+      return { task, start, end: preview ? preview.end : endMinutesOf(task, start) };
     });
     // 分道算法与课表 / 周视图共用一份：同刻多件事必须并排，不能互相盖住
+    // （预览也走这一遍：拖到别人身上时得并排，不能叠上去）
     return layoutLanes(spans, (a, b) => a.start - b.start || a.end - b.end).map(
       ({ item, lane, lanes }) => ({
         task: item.task,
@@ -305,9 +330,10 @@ export function CalendarDay({
         height: Math.max(MIN_BLOCK_HEIGHT, ((item.end - item.start) / 60) * HOUR_HEIGHT),
         column: lane,
         columns: lanes,
+        pending: item.task.id === pendingMove?.taskId,
       }),
     );
-  }, [timed]);
+  }, [pendingMove, timed]);
 
   const now = new Date();
   const isToday = isSameDay(date, now);
@@ -558,7 +584,7 @@ export function CalendarDay({
 interface TimedBlockProps extends Block {
   onSelect: (task: Task) => void;
   onComplete?: (task: Task) => void;
-  onRetime?: (task: Task, minutesOfDay: number) => Promise<void> | void;
+  onRetime?: (task: Task, startMinutes: number, endMinutes: number) => Promise<void> | void;
   onResize?: (task: Task, startMinutes: number, endMinutes: number) => Promise<void> | void;
   onDraggingChange: (dragging: boolean) => void;
 }
@@ -574,6 +600,7 @@ function TimedBlock({
   end,
   column,
   columns,
+  pending = false,
   onSelect,
   onComplete,
   onRetime,
@@ -614,12 +641,25 @@ function TimedBlock({
    */
   useEffect(() => {
     origin.value = start;
+    // startOrigin 也得跟上：它只初始化过一次，而 start 现在会因"待确认预览"变化
+    // ——不同步的话，确认后紧接着再拽一次边，算出来的始末是从旧位置量的
+    startOrigin.value = start;
     endOrigin.value = end;
     dragY.value = 0;
     lastSnap.value = start;
     edgeTopPx.value = 0;
     edgeBottomPx.value = 0;
-  }, [start, end, dragY, lastSnap, origin, endOrigin, edgeTopPx, edgeBottomPx]);
+  }, [
+    start,
+    end,
+    dragY,
+    lastSnap,
+    origin,
+    startOrigin,
+    endOrigin,
+    edgeTopPx,
+    edgeBottomPx,
+  ]);
 
   useEffect(
     () => () => {
@@ -700,7 +740,7 @@ function TimedBlock({
     onDraggingChange(false);
   }, [onDraggingChange]);
 
-  /** 拖整块松手：只写开始时刻，时长由 buildPlacedTime 按原 endAt 平移保留 */
+  /** 拖整块松手：报出新的起止（时长仍是原样），等父层确认后才真写库 */
   const commit = useCallback(
     (minutes: number) => {
       const next = snap(minutes);
@@ -714,7 +754,8 @@ function TimedBlock({
         dragY.value = 0;
         return;
       }
-      void Promise.resolve(onRetime(task, next)).finally(() => {
+      // 时长跟着走：只给开始时刻的话，父层得自己按原时长补一个结束
+      void Promise.resolve(onRetime(task, next, next + (end - start))).finally(() => {
         // 正常情况数据已落、top 已更新，归零无跳变；
         // 万一写库失败，也让块回到原位，不要停在半路。
         if (safety.current) clearTimeout(safety.current);
@@ -723,7 +764,7 @@ function TimedBlock({
         }, 400);
       });
     },
-    [dragY, onDraggingChange, onRetime, origin, task],
+    [dragY, end, onDraggingChange, onRetime, origin, start, task],
   );
 
   const gesture = useMemo(
@@ -898,8 +939,9 @@ function TimedBlock({
             left: `${column * widthPct}%`,
             width: `${widthPct}%`,
             zIndex: pickedUp || resizing ? 10 : 1,
-            // 完成的和已经过去的都退到背景里，让"还没做的"自己跳出来
-            opacity: muted ? (done ? 0.5 : 0.72) : 1,
+            // 完成的和已经过去的都退到背景里，让"还没做的"自己跳出来；
+            // 待确认的更淡一档 —— 它还没写库，是"打算放到这儿"，不是"已经在这儿"
+            opacity: pending ? 0.6 : muted ? (done ? 0.5 : 0.72) : 1,
           },
         ]}>
         <Pressable

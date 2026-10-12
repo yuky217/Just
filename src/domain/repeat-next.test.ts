@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { TaskKind, TaskStatus, TimeAttribute } from './enums';
 import {
+  REPEAT_PRESETS,
   advanceRepeatingTask,
   describeRepeat,
   describeReminder,
@@ -69,6 +70,50 @@ describe('nextOccurrence', () => {
       local(2026, 10, 5, 8, 0),
     );
     expect(next!.getDate()).toBe(19);
+  });
+
+  it('隔周（没有 byWeekday）：整两周，时刻保留', () => {
+    // 2026-10-05 是周一，隔一次 = 10-19
+    const next = nextOccurrence({ freq: 'weekly', interval: 2 }, local(2026, 10, 5, 8, 30));
+    expect(next!.getDate()).toBe(19);
+    expect(next!.getHours()).toBe(8);
+    expect(next!.getMinutes()).toBe(30);
+  });
+});
+
+describe('隔周预设（2026-10-12）', () => {
+  /**
+   * 只做"每两周"这一档：任务没有学期周次，"按第几周奇偶"无从算起。
+   * 锁住的是预设与描述两处口径一致 —— 面板上写"隔周"，别处也别写成"每 2 周"。
+   */
+  it('预设里有「隔周」，规则是 weekly + interval 2', () => {
+    const preset = REPEAT_PRESETS.find((p) => p.id === 'biweekly');
+    expect(preset?.label).toBe('隔周');
+    expect(preset?.rule).toEqual({ freq: 'weekly', interval: 2 });
+  });
+
+  it('隔周排在「每周」和「每月」之间（最常用的几档挨在一起）', () => {
+    const ids = REPEAT_PRESETS.map((p) => p.id);
+    expect(ids.indexOf('biweekly')).toBe(ids.indexOf('weekly') + 1);
+    expect(ids.indexOf('monthly')).toBe(ids.indexOf('biweekly') + 1);
+  });
+
+  it('描述：隔周 / 隔周 · 周一', () => {
+    expect(describeRepeat({ freq: 'weekly', interval: 2 })).toBe('隔周');
+    expect(describeRepeat({ freq: 'weekly', interval: 2, byWeekday: [1] })).toBe('隔周 · 周一');
+    // 三周以上才回到数字 —— "每 2 周"这种说法不如"隔周"
+    expect(describeRepeat({ freq: 'weekly', interval: 3 })).toBe('每 3 周');
+  });
+
+  it('完成一次后滚到两周后（不再滚到下周）', () => {
+    const task = dailyTask(local(2026, 10, 5, 9, 0), {
+      repeat: { freq: 'weekly', interval: 2 },
+    });
+    vi.setSystemTime(local(2026, 10, 5, 9, 5));
+    const next = advanceRepeatingTask(task);
+    expect(next).not.toBeNull();
+    const anchor = new Date(next!.time!.startAt!);
+    expect(anchor.getDate()).toBe(19);
   });
 });
 
