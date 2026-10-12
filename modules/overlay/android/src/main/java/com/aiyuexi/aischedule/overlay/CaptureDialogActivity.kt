@@ -7,10 +7,10 @@ import android.net.Uri
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
-import android.view.EditorInfo
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -60,8 +60,10 @@ class CaptureDialogActivity : Activity() {
       orientation = LinearLayout.VERTICAL
       background = GradientDrawableCompat.rounded(cardColor, dp(20f))
       setPadding(dp(20f), dp(18f), dp(20f), dp(16f))
-      // 吞掉卡片上的点击，别让"点输入框"变成"点外面关掉"
-      card.setOnClickListener(null)
+      // 吞掉卡片上的点击，别让"点输入框"变成"点外面关掉"。
+      // ⚠️ 用 isClickable 而不是 setOnClickListener(null)：后者是把「可点击」**关掉**，
+      // 卡片会放行触摸给外层的 root，点一下卡片就关窗（本意正好相反）。
+      isClickable = true
     }
 
     val title = TextView(this).apply {

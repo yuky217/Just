@@ -75,7 +75,7 @@
               "minHeight": "140dp",
               "targetCellWidth": 4,
               "targetCellHeight": 2,
-              "resizeMode": "both",
+              "resizeMode": "horizontal|vertical",
               "updatePeriodMillis": 1800000
             },
             {
@@ -86,7 +86,7 @@
               "minHeight": "240dp",
               "targetCellWidth": 4,
               "targetCellHeight": 4,
-              "resizeMode": "both",
+              "resizeMode": "horizontal|vertical",
               "updatePeriodMillis": 1800000
             },
             {
@@ -97,7 +97,7 @@
               "minHeight": "140dp",
               "targetCellWidth": 2,
               "targetCellHeight": 2,
-              "resizeMode": "both",
+              "resizeMode": "horizontal|vertical",
               "updatePeriodMillis": 1800000
             }
           ]
