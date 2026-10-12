@@ -60,7 +60,7 @@ describe('isTodo：谁算待办', () => {
     expect(isTodo(makeTask('a', { kind: TaskKind.Schedule }))).toBe(true);
   });
 
-  it('想法型不算 —— 它在想法库等拆解', () => {
+  it('想法型不算 —— 它在想法库等着被转成任务', () => {
     expect(isTodo(makeTask('a', { kind: TaskKind.Idea }))).toBe(false);
   });
 

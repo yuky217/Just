@@ -97,13 +97,15 @@ export const ideaRepository = {
   },
 
   /**
-   * 记下"这条想法拆成了哪条任务"。
+   * 记下"这条想法转成了哪条任务"。
    *
    * 只写这个指针，**不在想法上存步数** —— 步数是子任务表的实时事实
    * （用户去任务详情页删掉一步，存下来的数字就骗人了）。
-   * 也不写"已拆解"这种布尔标记：指针本身在不在就是答案。
+   * 也不写"已转过"这种布尔标记：指针本身在不在就是答案。
+   *
+   * （物理列名是历史遗留的 `breakdown_task_id`，理由见 schema.ts。）
    */
-  async setBreakdownTaskId(id: string, taskId: string): Promise<void> {
+  async setConvertedTaskId(id: string, taskId: string): Promise<void> {
     const db = await getDatabase();
     await db.runAsync(
       `UPDATE ${TABLE} SET breakdown_task_id = ?, updated_at = ? WHERE id = ?`,

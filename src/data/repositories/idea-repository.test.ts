@@ -76,3 +76,47 @@ describe('ideaRepository 批量删除与撤销', () => {
     expect((await ideaRepository.listArchived()).some((i) => i.id === a.id)).toBe(true);
   });
 });
+
+/**
+ * 转任务的指针 + 标签的落库往返。
+ *
+ * 这一层最容易静默坏掉：字段名在 TS 里叫 `convertedTaskId`、在库里叫
+ * `breakdown_task_id`，中间靠 mappers 接 —— 接错了不会有任何报错，
+ * 只是"转过任务的"标记在读出来之后消失，用户会以为转失败了又转一次。
+ */
+describe('ideaRepository 转任务指针与标签', () => {
+  it('记下转成的任务 id，再读出来还在（mapper 往返）', async () => {
+    const a = createIdea('做校园二手书平台');
+    await ideaRepository.create(a);
+    await ideaRepository.setConvertedTaskId(a.id, 'task_123');
+
+    expect((await ideaRepository.getById(a.id))?.convertedTaskId).toBe('task_123');
+  });
+
+  it('改正文不会把已转任务的指针抹掉', async () => {
+    const a = createIdea('先记一句');
+    await ideaRepository.create(a);
+    await ideaRepository.setConvertedTaskId(a.id, 'task_abc');
+
+    const loaded = await ideaRepository.getById(a.id);
+    expect(loaded).not.toBeNull();
+    await ideaRepository.save({ ...loaded!, content: '改过的正文' });
+
+    const again = await ideaRepository.getById(a.id);
+    expect(again?.content).toBe('改过的正文');
+    expect(again?.convertedTaskId).toBe('task_abc');
+  });
+
+  it('没转过任务的想法读出来是 null（不是空字符串）', async () => {
+    const a = createIdea('还没转');
+    await ideaRepository.create(a);
+    expect((await ideaRepository.getById(a.id))?.convertedTaskId).toBeNull();
+  });
+
+  it('标签存得住、读得回', async () => {
+    const a = createIdea('带标签的想法', undefined, ['工作', '灵感']);
+    await ideaRepository.create(a);
+    expect((await ideaRepository.getById(a.id))?.tags).toEqual(['工作', '灵感']);
+  });
+});
+

@@ -20,7 +20,7 @@ import { hasAnyTime, taskDue, type Task } from './task';
  * 唯一的例外是**还没排时间的日程型**（快记的一句"开会"、没写时间）——
  * 它没有"到点"可言，反而需要一个落点，否则会从所有列表里消失（见 `isTodo`）。
  *
- * 想法型（idea）也不进来：它在想法库里等着被拆解，不是待办。
+ * 想法型（idea）也不进来：它在想法库里等着被转成任务，不是待办。
  */
 
 /**
@@ -75,7 +75,7 @@ const BUCKET_ORDER: TodoBucket[] = ['overdue', 'today', 'upcoming', 'someday', '
  * 这不是假设：`task-repository.test.ts` 的可达性扫描把
  * `todo/doing/waiting/done × schedule × 无时间` 四种组合直接扫了出来。
  *
- * 想法型不在例外里 —— 它在想法库等拆解，那里才是它的家（`kind` 判定在后，
+ * 想法型不在例外里 —— 它在想法库等被转成任务，那里才是它的家（`kind` 判定在后，
  * 就是为了不被这条例外顺带收进来）。
  */
 export function isTodo(task: Pick<Task, 'kind' | 'time'>): boolean {

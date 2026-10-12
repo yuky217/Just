@@ -98,9 +98,13 @@ CREATE TABLE IF NOT EXISTS ${TABLES.ideas} (
   tags_json   TEXT NOT NULL DEFAULT '[]',
   source      TEXT NOT NULL DEFAULT 'manual',
   archived_at TEXT,
-  -- 拆解出来的那条父任务（见 domain/idea-breakdown.ts）。
-  -- 想法库原本是条死路：只能归档、变不成"要做的"。这一列就是那条出口的凭据，
-  -- 有了它，一条想法才能说出"我已经被拆成 N 步了"。
+  -- 转成的那条任务（见 domain/idea-to-task.ts）。
+  -- 想法库原本是条死路：只能归档、变不成"要做的"。这一列就是那条出口的凭据。
+  --
+  -- ⚠️ 列名里的 "breakdown" 是历史遗留（那时想法侧也叫"拆解"，2026-10-12 已改叫
+  --    "转成任务"，拆分只属于任务侧）。**故意不改列名**：建表语句先于迁移执行，
+  --    RENAME COLUMN 在全新安装上会以 "no such column" 让整个开库失败 ——
+  --    而迁移执行器只对 "duplicate column" 容错。改名的收益配不上这个风险。
   breakdown_task_id TEXT,
   ${COMMON_COLUMNS}
 );

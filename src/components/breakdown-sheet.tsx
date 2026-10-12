@@ -14,7 +14,7 @@ import {
 
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
-import { BREAKDOWN_STEP_MAX } from '@/domain/idea-breakdown';
+import { BREAKDOWN_STEP_MAX } from '@/domain/task-breakdown';
 import { useTheme } from '@/hooks/use-theme';
 
 /**
@@ -35,7 +35,7 @@ import { useTheme } from '@/hooks/use-theme';
  */
 export interface BreakdownSheetProps {
   visible: boolean;
-  /** 要拆的事（任务标题 / 想法内容） */
+  /** 要拆的那件事（任务的标题 / 备注） */
   subject: string;
   /** 备注，一并给模型作参考 */
   note?: string | null;

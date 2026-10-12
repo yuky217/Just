@@ -1,25 +1,22 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, TextInput, View } from 'react-native';
 
 import { Card } from '@/components/card';
 import { CaptureInput } from '@/components/capture-input';
 import { EmptyState } from '@/components/empty-state';
-import { BreakdownSheet } from '@/components/breakdown-sheet';
-import { IdeaBreakdownSheet } from '@/components/idea-breakdown-sheet';
 import { TagEditorSheet } from '@/components/tag-editor-sheet';
-import { isCapabilityReady, suggestBreakdown } from '@/capabilities/client';
-import { AiCapability } from '@/capabilities/types';
 import { Screen } from '@/components/screen';
 import { ThemedText } from '@/components/themed-text';
 import { UndoBar } from '@/components/undo-bar';
 import { BottomTabInset, Spacing } from '@/constants/theme';
 import type { Idea } from '@/domain/idea';
+import { IDEA_TIME_RANGES, IDEA_TIME_RANGE_LABEL, filterIdeas } from '@/domain/idea-filter';
+import type { IdeaTimeRange } from '@/domain/idea-filter';
 import type { IdeaDeleteUndo } from '@/domain/bulk-delete';
 import { useTheme } from '@/hooks/use-theme';
 import { useAppStore } from '@/state/app-store';
-import { selectCapabilityGate, useSettings } from '@/state/settings-store';
 import { formatMonthDay } from '@/utils/datetime';
 
 /**
@@ -40,14 +37,11 @@ import { formatMonthDay } from '@/utils/datetime';
 export default function IdeasScreen() {
   const theme = useTheme();
   const router = useRouter();
-  /** 从全库搜索跳过来时带着关键词（`/ideas?q=…`），落地就先替用户填上 */
-  const params = useLocalSearchParams<{ q?: string }>();
 
   const ideas = useAppStore((state) => state.ideas);
   const dataVersion = useAppStore((state) => state.dataVersion);
   const capture = useAppStore((state) => state.capture);
   const tasks = useAppStore((state) => state.tasks);
-  const breakdownIdea = useAppStore((state) => state.breakdownIdea);
   const archiveIdea = useAppStore((state) => state.archiveIdea);
   const loadArchivedIdeas = useAppStore((state) => state.loadArchivedIdeas);
   const unarchiveIdea = useAppStore((state) => state.unarchiveIdea);
@@ -57,8 +51,11 @@ export default function IdeasScreen() {
   const saveIdea = useAppStore((state) => state.saveIdea);
 
   const [keyword, setKeyword] = useState('');
-  /** 正在拆的那条想法（null = 面板没开） */
-  const [breaking, setBreaking] = useState<Idea | null>(null);
+  /**
+   * 检索的三个维度：关键词 × 标签 × 时间范围，三者正交、可叠加。
+   * 收在 `filterIdeas`（domain）里算，页面只负责把三个值喂进去。
+   */
+  const [range, setRange] = useState<IdeaTimeRange>('all');
   /*
     主列表多选删除。想法页只有主列表会积压（归档箱里一条条删就够了），
     所以选择模式只开在主列表。
@@ -115,29 +112,17 @@ export default function IdeasScreen() {
     void undoDeleteIdeasAction(ideaUndoToken).then(() => setIdeaUndoToken(null));
   }, [ideaUndoToken, undoDeleteIdeasAction]);
 
-  /*
-    这一页是 Tab，可能早就挂载着 —— 所以不能只在 useState 初值里读一次 q：
-    从搜索页跳过来时页面已经在了，得跟着参数变。
-  */
-  useEffect(() => {
-    const q = params.q;
-    if (typeof q === 'string' && q) setKeyword(q);
-  }, [params.q]);
-
   /**
-   * 每条任务底下有几个子任务 —— 想法行要说"我拆成了几步"。
+   * 这条想法转成的那条任务（没转过 / 那条任务已被删 → undefined）。
    *
-   * 现算而不是存在想法上：步数是子任务表的实时事实，
-   * 用户去任务详情页删掉一步，存下来的数字就开始骗人了。
+   * 现查而不是在想法上存个布尔：指针在不在、指向的东西还在不在，都是实时事实。
+   * 任务被删掉时当作"没转过" —— 不然行上会写着"已转成任务"，点进去却是空白。
    */
-  const subtaskCount = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const task of tasks) {
-      if (!task.parentId) continue;
-      map.set(task.parentId, (map.get(task.parentId) ?? 0) + 1);
-    }
-    return map;
-  }, [tasks]);
+  const convertedTaskOf = useCallback(
+    (idea: Idea) =>
+      idea.convertedTaskId ? tasks.find((task) => task.id === idea.convertedTaskId) : undefined,
+    [tasks],
+  );
 
   /**
    * 整个想法库里出现过的标签，按使用次数降序 —— 给标签编辑面板做联想用。
@@ -154,40 +139,19 @@ export default function IdeasScreen() {
     return [...count.entries()].sort((a, b) => b[1] - a[1]).map(([t]) => t);
   }, [ideas]);
 
-  /** 已拆出来的那条父任务。父任务被删掉时当作"没拆过"—— 否则点进去是一片空白 */
-  const parentOf = useCallback(
-    (idea: Idea) => (idea.breakdownTaskId ? tasks.find((t) => t.id === idea.breakdownTaskId) : undefined),
-    [tasks],
-  );
-
   /**
-   * 点一行：没拆过 → 打开拆解面板；拆过 → 去看那条任务。
+   * 点一行 → 进想法详情页（2026-10-12）。
    *
-   * 拆过之后**不再让拆第二次**：追加步骤走任务详情页已有的子任务能力，
-   * 那才是唯一入口。同一件事开两条路，最后一定会出现"从这边加的和从那边加的对不上"。
+   * 以前这里直接打开拆解面板，拆过则跳去任务 —— 那是把想法当任务对待。
+   * 想法连"要不要做"都还没定，它的动作是**记录 · 加标签 · 筛选 · 归档 · 转成任务**，
+   * 详情页就是这几件事的家。转成任务之后想拆细，去那条任务的详情页拆。
    */
-  /*
-   * AI 拆解开着时，点一行走 **AI 面板**（`BreakdownSheet`）—— 它本来就能自己写，
-   * 所以不需要再给用户一个「帮我拆 / 我自己写」的选择：选哪条路是我们要替他决定的。
-   * 能力没开就走原来的手写面板，两个入口的落库出口是同一个 `breakdownIdea`。
-   */
-  const gate = useSettings(selectCapabilityGate);
-  const canAiBreakdown = isCapabilityReady(gate, AiCapability.Breakdown);
-
-  const generateBreakdown = async (): Promise<string[]> => {
-    if (!breaking) return [];
-    const res = await suggestBreakdown(gate, breaking.content);
-    return res.steps;
-  };
-
-  const openIdea = (idea: Idea) => {
-    const parent = parentOf(idea);
-    if (parent) {
-      router.push(`/task/${parent.id}`);
-      return;
-    }
-    setBreaking(idea);
-  };
+  const openIdea = useCallback(
+    (idea: Idea) => {
+      router.push(`/idea/${idea.id}`);
+    },
+    [router],
+  );
 
   /**
    * 归档箱：默认收起，翻的时候才拉数据。
@@ -205,21 +169,13 @@ export default function IdeasScreen() {
     void reloadArchived();
   }, [archiveOpen, dataVersion, reloadArchived]);
 
-  const visible = useMemo(() => {
-    const k = keyword.trim().toLowerCase();
-    return ideas.filter((idea) => {
-      // 标签筛选：点了一个标签就只看带它的
-      if (activeTag && !idea.tags.includes(activeTag)) return false;
-      // 关键词：正文或标签里出现都算（和全库搜索口径一致）
-      if (k) {
-        const hit =
-          idea.content.toLowerCase().includes(k) ||
-          idea.tags.some((t) => t.toLowerCase().includes(k));
-        if (!hit) return false;
-      }
-      return true;
-    });
-  }, [ideas, keyword, activeTag]);
+  /** 检索：时间范围 × 标签 × 关键词，口径全在 `filterIdeas` 里 */
+  const visible = useMemo(
+    () => filterIdeas(ideas, { keyword, tag: activeTag, range }),
+    [ideas, keyword, activeTag, range],
+  );
+  /** 当前是不是"在看一部份" —— 空态的文案要区分"库里本来就空"和"筛完没剩" */
+  const filtering = Boolean(keyword.trim()) || Boolean(activeTag) || range !== 'all';
 
   return (
     <Screen
@@ -315,47 +271,71 @@ export default function IdeasScreen() {
         )}
       </View>
 
+      {/*
+        筛选行：时间范围（全部 / 今天 / 本周 / 本月）+ 当前标签。
+        都是"点一下"的事 —— 手机上一个点比打字快一个量级，这正是做筛选的理由。
+        两个维度正交：时间管"什么时候记的"，标签管"是关于什么的"，可以同时生效。
+      */}
+      <View style={styles.filterRow}>
+        {IDEA_TIME_RANGES.map((option) => {
+          const active = range === option;
+          return (
+            <Pressable
+              key={option}
+              accessibilityRole="button"
+              accessibilityState={{ selected: active }}
+              accessibilityLabel={`只看${IDEA_TIME_RANGE_LABEL[option]}记下的`}
+              onPress={() => setRange(option)}
+              style={[
+                styles.rangeChip,
+                {
+                  backgroundColor: active ? theme.text : theme.backgroundElement,
+                  borderColor: active ? theme.text : theme.backgroundSelected,
+                },
+              ]}>
+              <ThemedText
+                type="small"
+                style={{ color: active ? theme.background : theme.textSecondary }}>
+                {IDEA_TIME_RANGE_LABEL[option]}
+              </ThemedText>
+            </Pressable>
+          );
+        })}
+        {activeTag ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`取消按标签「${activeTag}」筛选`}
+            onPress={clearFilter}
+            style={[
+              styles.rangeChip,
+              { backgroundColor: theme.backgroundElement, borderColor: theme.tint },
+            ]}>
+            <Ionicons name="pricetag-outline" size={13} color={theme.tint} />
+            <ThemedText type="small" themeColor="tint">
+              {activeTag}
+            </ThemedText>
+            <Ionicons name="close" size={13} color={theme.textSecondary} />
+          </Pressable>
+        ) : null}
+      </View>
+
       {visible.length ? (
         <View style={styles.list}>
-          {visible.map((idea) => {
-            const parent = parentOf(idea);
-            return (
-              <IdeaRow
-                key={idea.id}
-                idea={idea}
-                stepCount={parent ? (subtaskCount.get(parent.id) ?? 0) : 0}
-                selecting={selectingIdeas}
-                selected={selectedIdeaIds.has(idea.id)}
-                onToggleSelect={toggleSelectIdea}
-                onOpen={() => openIdea(idea)}
-                onArchive={(id) => void archiveIdea(id)}
-                onTagTap={filterByTag}
-                onEditTags={() => openTagEditor(idea)}
-              />
-            );
-          })}
+          {visible.map((idea) => (
+            <IdeaRow
+              key={idea.id}
+              idea={idea}
+              converted={Boolean(convertedTaskOf(idea))}
+              selecting={selectingIdeas}
+              selected={selectedIdeaIds.has(idea.id)}
+              onToggleSelect={toggleSelectIdea}
+              onOpen={() => openIdea(idea)}
+              onArchive={(id) => void archiveIdea(id)}
+              onTagTap={filterByTag}
+              onEditTags={() => openTagEditor(idea)}
+            />
+          ))}
         </View>
-      ) : null}
-
-      {/*
-        正在按标签筛选时，列表上方给一条可清除的筛选条。
-        点筛选条本身 = 取消筛选；它和搜索框是两套正交的过滤，互不覆盖。
-      */}
-      {activeTag ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`取消按标签「${activeTag}」筛选`}
-          onPress={clearFilter}
-          style={[
-            styles.filterBar,
-            { backgroundColor: theme.backgroundElement, borderColor: theme.backgroundSelected },
-          ]}>
-          <Ionicons name="pricetag-outline" size={14} color={theme.tint} />
-          <ThemedText type="small" themeColor="tint">
-            {activeTag}
-          </ThemedText>
-          <Ionicons name="close" size={14} color={theme.textSecondary} />
-        </Pressable>
       ) : null}
 
       {/*
@@ -365,8 +345,8 @@ export default function IdeasScreen() {
       {visible.length ? null : (
         <EmptyState
           icon="bulb-outline"
-          title={keyword || activeTag ? '没有匹配的想法' : '想法库还是空的'}
-          hint={keyword || activeTag ? '换个说法或清掉筛选' : '随手记一句，将来的你会感谢现在的你'}
+          title={filtering ? '没有匹配的想法' : '想法库还是空的'}
+          hint={filtering ? '换个说法或清掉筛选' : '随手记一句，将来的你会感谢现在的你'}
         />
       )}
 
@@ -427,35 +407,6 @@ export default function IdeasScreen() {
       ) : null}
 
       {/*
-        拆解面板。交出去之后**不跳走** —— 行上立刻多出「已拆成 N 步」，
-        那行本身就是回执；跳进任务详情会把"接着拆下一条想法"打断。
-      */}
-      {canAiBreakdown ? (
-        <BreakdownSheet
-          visible={breaking !== null}
-          subject={breaking?.content ?? ''}
-          onGenerate={generateBreakdown}
-          onClose={() => setBreaking(null)}
-          onSubmit={(steps) => {
-            const target = breaking;
-            setBreaking(null);
-            if (target) void breakdownIdea(target.id, steps);
-          }}
-        />
-      ) : (
-        <IdeaBreakdownSheet
-          visible={breaking !== null}
-          idea={breaking}
-          onClose={() => setBreaking(null)}
-          onSubmit={(steps) => {
-            const target = breaking;
-            setBreaking(null);
-            if (target) void breakdownIdea(target.id, steps);
-          }}
-        />
-      )}
-
-      {/*
         标签编辑面板。它是 Modal，挂在哪都不影响层级，放最后即可。
         allTags 是整库标签联想；保存走 store.saveIdea（落库 + 刷新，列表 chip 立即变）。
       */}
@@ -472,7 +423,7 @@ export default function IdeasScreen() {
 
 function IdeaRow({
   idea,
-  stepCount,
+  converted,
   selecting = false,
   selected = false,
   onToggleSelect,
@@ -482,8 +433,8 @@ function IdeaRow({
   onEditTags,
 }: {
   idea: Idea;
-  /** 已经拆出来的步数（0 = 还没拆） */
-  stepCount: number;
+  /** 已经转成任务了吗（转出来的那条任务还在） */
+  converted: boolean;
   /** 是否处于多选模式（主列表用） */
   selecting?: boolean;
   /** 本行是否被选中 */
@@ -510,9 +461,7 @@ function IdeaRow({
           ? selected
             ? '取消选择'
             : '选择'
-          : stepCount
-            ? `去看「${idea.content}」拆出来的任务`
-            : `把「${idea.content}」拆成能动手的几步`
+          : `打开「${idea.content}」${converted ? '（已转成任务）' : ''}`
       }
       onPress={handlePress}
       style={({ pressed }) => [
@@ -589,12 +538,12 @@ function IdeaRow({
 
         <ThemedText type="small" themeColor="textSecondary" style={styles.ideaMeta}>
           {formatMonthDay(new Date(idea.createdAt))} 记下
-          {stepCount ? ` · 已拆成 ${stepCount} 步` : ''}
+          {converted ? ' · 已转成任务' : ''}
         </ThemedText>
       </View>
       {/*
-        归档按钮在内层。web 上 click 会冒泡，不拦一下的话点归档会顺带把拆解面板打开
-        （原生上内层本来就赢得手势，这一句是两端的统一保险）。
+        归档按钮在内层。web 上 click 会冒泡，不拦一下的话点归档会顺带把整行的
+        "打开详情"也触发了（原生上内层本来就赢得手势，这一句是两端的统一保险）。
       */}
       {!selecting ? (
         <Pressable
@@ -648,14 +597,15 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
   },
   tagAdd: { paddingHorizontal: Spacing.two },
-  /** 按标签筛选时的可清除筛选条（列表上方） */
-  filterBar: {
+  /** 筛选行：时间范围 chip + 当前标签，排在搜索框下面、列表上面 */
+  filterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.one },
+  /** 筛选 chip（时间范围 / 标签）。选中 = 实心反白，未选中 = 描边 */
+  rangeChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    alignSelf: 'flex-start',
-    gap: Spacing.one,
+    gap: 2,
     paddingHorizontal: Spacing.two,
-    paddingVertical: Spacing.one,
+    paddingVertical: 3,
     borderRadius: Spacing.two,
     borderWidth: StyleSheet.hairlineWidth,
   },

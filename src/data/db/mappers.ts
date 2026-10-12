@@ -211,7 +211,8 @@ export function ideaFromRow(row: IdeaRow): Idea {
     tags: parseJson<string[]>(row.tags_json, []),
     source: row.source as CaptureSource,
     archivedAt: row.archived_at,
-    breakdownTaskId: row.breakdown_task_id ?? null,
+    // 列名是历史遗留的 breakdown_task_id（改列名要 RENAME 迁移，全新安装会开不了库）
+    convertedTaskId: row.breakdown_task_id ?? null,
   };
 }
 
@@ -222,7 +223,7 @@ export function ideaColumns(idea: Idea): ColumnMap {
     tags_json: JSON.stringify(idea.tags ?? []),
     source: idea.source,
     archived_at: idea.archivedAt ?? null,
-    breakdown_task_id: idea.breakdownTaskId ?? null,
+    breakdown_task_id: idea.convertedTaskId ?? null,
     ...writeBase(idea),
   };
 }

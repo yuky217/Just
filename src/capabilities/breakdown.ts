@@ -1,13 +1,16 @@
-import { BREAKDOWN_STEP_MAX } from '@/domain/idea-breakdown';
+import { BREAKDOWN_STEP_MAX } from '@/domain/task-breakdown';
 
 import type { CapabilitySpec } from './types';
 
 /**
  * 能力「拆解」（主文档 3.1 Breakdown）：一件事 → 几步能动手的步骤。
  *
- * **为什么现在才接**：想法页的手写拆解（`domain/idea-breakdown`）一直是通的，
- * 手写那条路的成本是"用户得自己想清楚每一步"——而"我也不知道从哪下手"
- * 恰恰是最需要拆的场景。AI 在这里的价值不是更准，是**先给一版，让用户改**。
+ * **为什么现在才接**：任务详情页的子任务一直是通的，手写那条路的成本是
+ * "用户得自己想清楚每一步"——而"我也不知道从哪下手"恰恰是最需要拆的场景。
+ * AI 在这里的价值不是更准，是**先给一版，让用户改**。
+ *
+ * ⚠️ 这条能力**只服务任务**（任务详情页的「拆解」）。想法那边不拆 ——
+ * 想法转成任务只建一条任务（`domain/idea-to-task`），要拆去那条任务的详情页拆。
  *
  * 三条边界，都是为了"AI 出的东西不许直接进库"：
  *
@@ -80,7 +83,7 @@ export function parseBreakdown(raw: unknown): BreakdownSuggestion | null {
 /**
  * 洗步骤：去空、去重、截断、限条数、保序。
  *
- * 与 `domain/idea-breakdown.cleanSteps` 是**同一套口径**（都为了"落库前最后一道闸"），
+ * 与 `domain/task-breakdown.cleanBreakdownSteps` 是**同一套口径**（都为了"落库前最后一道闸"），
  * 这里多一步 `STEP_TEXT_MAX` 截断，因为模型不知道我们的列表一行有多宽。
  */
 function cleanSuggestions(list: readonly unknown[]): string[] {

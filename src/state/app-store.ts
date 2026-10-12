@@ -50,7 +50,7 @@ import {
   occurrencesInPeriod,
 } from '@/domain/habit-period';
 import type { Idea } from '@/domain/idea';
-import { planBreakdown } from '@/domain/idea-breakdown';
+import { planIdeaTask } from '@/domain/idea-to-task';
 import type { IdeaDeleteUndo, TaskDeleteUndo } from '@/domain/bulk-delete';
 import { advanceRepeatingTask } from '@/domain/repeat-next';
 import { buildSpanTime } from '@/domain/schedule-presets';
@@ -179,18 +179,25 @@ interface AppState {
   /** 批量删想法，返回撤销凭据 —— 同 `removeTasks`，一次删一屏就得留一条退路 */
   removeIdeas: (ids: readonly string[]) => Promise<IdeaDeleteUndo>;
   undoDeleteIdeas: (undo: IdeaDeleteUndo) => Promise<void>;
-  /** 改一条想法（目前只用于编辑标签）：落库后整库刷新，让列表里的 chip 立即更新 */
-  saveIdea: (idea: Idea) => Promise<void>;
   /**
-   * 把一条想法拆成"一条父任务 + N 条子任务"，返回父任务 id。
-   *
-   * 产出挂在同一条父任务下，而不是 N 条并列的任务：步骤离开那件事就没有意义
-   * （"查资料"是谁在查？），散进待办只会把它搅成一锅粥。挂在父任务下还白拿一条规则 ——
-   * 子任务全部完成时父任务自动完成，这正是"这件事做完了"的定义。
-   *
-   * `planBreakdown` 判为"这次什么都不该做"（没写步骤 / 想法是空的）时返回 null。
+   * 改一条想法（编辑正文 / 标签）：落库后整库刷新，让列表里的 chip 立即更新。
+   * 返回**落库后的那份**（带新的 updatedAt）—— 详情页要拿它显示"改于几时"。
    */
-  breakdownIdea: (ideaId: string, steps: readonly string[]) => Promise<string | null>;
+  saveIdea: (idea: Idea) => Promise<Idea>;
+  /** 按 id 取一条想法（想法详情页用；归档过的也能取到） */
+  loadIdea: (id: string) => Promise<Idea | null>;
+  /**
+   * 把一条想法转成一条任务，返回那条任务的 id。
+   *
+   * ⚠️ **只建一条任务，不拆步骤** —— 拆解是任务那边的事（任务详情页的「拆解」）。
+   * 转出来的任务刻意不排时间：没时间 = 待规划，它会自动落到待办，
+   * 那正是"一个念头变成一件要做的事"该去的地方。想排期/想拆细，去那条任务的详情页。
+   *
+   * 想法原文完整留在任务的 note 里；想法自己的标签原样带过去（用户不必再打一遍）。
+   * 已经转过的不再建第二条（返回原来那条的 id）—— 重复点两下不该多出两件事。
+   * `planIdeaTask` 判为"这次什么都不该做"（想法是空的）时返回 null。
+   */
+  convertIdeaToTask: (ideaId: string) => Promise<string | null>;
 
   /**
    * 在某个容器下**直接新建**一条任务（容器页的「新建」）。
@@ -632,41 +639,41 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   saveIdea: async (idea) => {
-    await ideaRepository.save(idea);
+    const saved = await ideaRepository.save(idea);
     await get().refresh();
+    return saved;
   },
 
-  breakdownIdea: async (ideaId, steps) => {
+  loadIdea: async (id) => ideaRepository.getById(id),
+
+  convertIdeaToTask: async (ideaId) => {
     // 想法从库里现读一份：界面手上的那份可能是翻页前拿到的旧对象
     const idea = await ideaRepository.getById(ideaId);
     if (!idea) return null;
+    // 已经转过就不再建第二条：重复点两下不该多出两件事
+    if (idea.convertedTaskId) return idea.convertedTaskId;
 
-    const plan = planBreakdown(idea.content, steps);
+    const plan = planIdeaTask(idea.content);
     if (!plan) return null;
 
-    // 父任务**刻意不给时间**。拆出来的是一份"要做哪些事"的清单，不是排期；
-    // 没时间 = 待规划，它会自动落到待办 —— 那正是拆解产物该去的地方。
-    // 给每一步自动派一份时间是排程算法该做的事，这里做等于替用户排了一遍程。
-    const parent = createTask({
+    // 任务**刻意不给时间**。一个念头先变成"一件要做的事"，不是排期；
+    // 没时间 = 待规划，它会自动落到待办 —— 那正是它该去的地方。
+    // 自动派时间是排程算法该做的事，这里做等于替用户排了一遍程。
+    const task = createTask({
       title: plan.title,
       note: plan.note,
       kind: TaskKind.Execution,
       source: CaptureSource.Manual,
+      // 想法上的标签原样带过去：用户不必在任务里再打一遍
+      tags: idea.tags,
     });
-    await taskRepository.create(parent);
+    await taskRepository.create(task);
 
-    // 整批带同一个标记：从想法拆出来的几步同样要能一键撤销
-    // （去那件事的详情页点「撤销拆解」）
-    const batch = newBreakdownBatch();
-    for (const title of plan.steps) {
-      await taskRepository.create(createSubtask(parent.id, title, batch));
-    }
-
-    // 指针回写到想法上：这是"拆过"的唯一凭据（步数不存，问子任务表要）
-    await ideaRepository.setBreakdownTaskId(ideaId, parent.id);
+    // 指针回写到想法上：这是"转过了"的唯一凭据
+    await ideaRepository.setConvertedTaskId(ideaId, task.id);
 
     await get().refresh();
-    return parent.id;
+    return task.id;
   },
 
   addTaskToContainer: async (containerId, title) => {

@@ -57,12 +57,12 @@ export default function SearchScreen() {
           router.push('/marks');
           return;
         case 'idea':
-          // 想法页有它自己的搜索框，把当前关键词带过去预填 —— 落地就能看到那条
-          router.push({ pathname: '/ideas', params: { q: keyword.trim() } });
+          // 直接进那条想法的详情页 —— 搜到它就是找到了它，不必再落到列表里找一遍
+          router.push(`/idea/${id}`);
           return;
       }
     },
-    [keyword, router],
+    [router],
   );
 
   const searching = keyword.trim().length > 0;

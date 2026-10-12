@@ -167,7 +167,7 @@ export function createIdea(
     tags,
     source,
     archivedAt: null,
-    breakdownTaskId: null,
+    convertedTaskId: null,
   };
 }
 
