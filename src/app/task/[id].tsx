@@ -31,6 +31,7 @@ import { describeProgress } from '@/domain/focus-link';
 import {
   buildHabitConversion,
   canConvertToHabit,
+  HABIT_CADENCE_PRESETS,
   type HabitCadence,
 } from '@/domain/habit-convert';
 import { describePeriodProgress, occurrencesInPeriod } from '@/domain/habit-period';
@@ -76,18 +77,11 @@ const AUTOSAVE_DELAY_MS = 600;
  */
 const KIND_OPTIONS: TaskKindValue[] = [TaskKind.Schedule, TaskKind.Execution, TaskKind.Habit];
 
-/**
- * "转为习惯"的预设。
- *
- * 不做一个"频率 + 次数"的二级表单：这一步的核心是**换判定域**，
- * 频率是唯一需要选的东西，而常见值就那么几个。选完还能在「目标」卡里改次数。
+/*
+ * "转为习惯"能选的节奏来自 `domain/habit-convert.HABIT_CADENCE_PRESETS` ——
+ * 习惯页的「新建习惯」用的是同一组。两边各写一份的话，迟早会出现
+ * "'每周 5 次'在任务页有、在习惯页没有"这种对不上的事。
  */
-const CONVERT_PRESETS: ReadonlyArray<{ label: string; cadence: HabitCadence; target: number }> = [
-  { label: '每天 1 次', cadence: 'daily', target: 1 },
-  { label: '每周 3 次', cadence: 'weekly', target: 3 },
-  { label: '每周 5 次', cadence: 'weekly', target: 5 },
-  { label: '每月 10 次', cadence: 'monthly', target: 10 },
-];
 
 export default function TaskDetailScreen() {
   const params = useLocalSearchParams<{ id?: string | string[] }>();
@@ -1265,7 +1259,7 @@ export default function TaskDetailScreen() {
           title="转为习惯"
           hint="按打卡次数判定；够目标自动达成">
           <View style={styles.chips}>
-            {CONVERT_PRESETS.map((preset) => (
+            {HABIT_CADENCE_PRESETS.map((preset) => (
               <Chip
                 key={preset.label}
                 label={preset.label}

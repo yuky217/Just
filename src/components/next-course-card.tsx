@@ -20,7 +20,24 @@ import { useAppStore } from '@/state/app-store';
  *
  * 没有课表时什么都不渲染 —— 不占位、不留一句"还没有课"。
  */
-export function NextCourseCard({ onPress }: { onPress: (courseId: string) => void }) {
+export interface NextCourseCardProps {
+  onPress: (courseId: string) => void;
+  /**
+   * 嵌在别人的卡里时用（首页把「课」和「习惯」并成一块两行）：
+   * 去掉自己的底色、圆角与横向内边距，让外层那块统一负责"这是一个容器"。
+   * 单摆着的时候不要传 —— 那时它自己就是那一块。
+   */
+  bare?: boolean;
+  /**
+   * 紧跟着还有一行同类内容（习惯）时，在自己底下画一条细线。
+   *
+   * 由**它自己**画而不是外面画：没有下一节课时它整个不渲染（返回 null），
+   * 外面画的那条线就会孤零零留在顶上，看着像一条没人要的分隔。
+   */
+  dividerAfter?: boolean;
+}
+
+export function NextCourseCard({ onPress, bare, dividerAfter }: NextCourseCardProps) {
   const theme = useTheme();
   const dark = useColorScheme() === 'dark';
   const courses = useAppStore((state) => state.courses);
@@ -51,38 +68,46 @@ export function NextCourseCard({ onPress }: { onPress: (courseId: string) => voi
         : `${timing} ${clock}`;
 
   return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={`${slot.course.title}，${headline}`}
-      onPress={() => onPress(slot.course.id)}
-      style={({ pressed }) => [
-        styles.row,
-        { backgroundColor: theme.backgroundElement, opacity: pressed ? 0.75 : 1 },
-      ]}>
-      <View style={[styles.stripe, { backgroundColor: color.background, borderColor: color.border }]} />
-      <View style={styles.body}>
-        <ThemedText type="smallBold" numberOfLines={1}>
-          {slot.course.title}
-        </ThemedText>
-        <ThemedText type="small" themeColor="textSecondary" numberOfLines={1} style={styles.meta}>
-          {headline}
-          {place ? ` · ${place}` : ''}
-        </ThemedText>
-      </View>
-      <Ionicons name="chevron-forward" size={16} color={theme.textSecondary} />
-    </Pressable>
+    <>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`${slot.course.title}，${headline}`}
+        onPress={() => onPress(slot.course.id)}
+        style={({ pressed }) => [
+          styles.row,
+          bare
+            ? styles.rowBare
+            : [styles.rowCard, { backgroundColor: theme.backgroundElement }],
+          { opacity: pressed ? 0.75 : 1 },
+        ]}>
+        <View style={[styles.stripe, { backgroundColor: color.background, borderColor: color.border }]} />
+        <View style={styles.body}>
+          <ThemedText type="smallBold" numberOfLines={1}>
+            {slot.course.title}
+          </ThemedText>
+          <ThemedText type="small" themeColor="textSecondary" numberOfLines={1} style={styles.meta}>
+            {headline}
+            {place ? ` · ${place}` : ''}
+          </ThemedText>
+        </View>
+        <Ionicons name="chevron-forward" size={16} color={theme.textSecondary} />
+      </Pressable>
+      {dividerAfter ? (
+        <View style={[styles.divider, { backgroundColor: theme.backgroundSelected }]} />
+      ) : null}
+    </>
   );
 }
 
 const styles = StyleSheet.create({
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
+  row: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
+  rowCard: {
     borderRadius: Spacing.three,
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
   },
+  rowBare: { paddingVertical: Spacing.two },
+  divider: { height: StyleSheet.hairlineWidth },
   stripe: { width: 4, height: 30, borderRadius: 2, borderWidth: 1 },
   body: { flex: 1, gap: 1 },
   meta: { fontSize: 12, lineHeight: 16 },

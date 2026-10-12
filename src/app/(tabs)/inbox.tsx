@@ -99,20 +99,24 @@ export default function InboxScreen() {
   const [arranging, setArranging] = useState<Task | null>(null);
 
   /*
-    多选删除。一次只在一个档里选（「清掉这一档」是批量删除最常见的动机），
-    所以用一个 bucket 标记当前进入选择的是哪一档，而不是全局多选模式。
+    多选删除。**全局一份**（2026-10-13 改）。
+    原来是"进某一档选择"——每个档头各挂一个「选择」，五个档就是五个一模一样的入口，
+    而它们干的事本来就一样。收成右上角一处之后：
+    - 屏幕上一屏少五个重复的词；
+    - 选择变成**跨档**的，能一次清掉"过期的 + 今天没做完的"这种组合
+      （以前得选两次、删两次、撤销两次）。
   */
-  const [selectingBucket, setSelectingBucket] = useState<TodoBucket | null>(null);
+  const [selecting, setSelecting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   /** 删除后拿到的撤销凭据；非空就显示底部撤销条 */
   const [undoToken, setUndoToken] = useState<TaskDeleteUndo | null>(null);
 
-  const enterSelect = useCallback((bucket: TodoBucket) => {
-    setSelectingBucket(bucket);
+  const enterSelect = useCallback(() => {
+    setSelecting(true);
     setSelectedIds(new Set());
   }, []);
   const exitSelect = useCallback(() => {
-    setSelectingBucket(null);
+    setSelecting(false);
     setSelectedIds(new Set());
   }, []);
   const toggleSelect = useCallback((task: Task) => {
@@ -257,9 +261,26 @@ export default function InboxScreen() {
       */
       scrollEnabled={!reordering}
       right={
-        <Pressable hitSlop={8} onPress={() => router.push('/capture?from=inbox')}>
-          <Ionicons name="add" size={24} color={theme.text} />
-        </Pressable>
+        <View style={styles.headerActions}>
+          {selecting ? (
+            <Pressable hitSlop={8} accessibilityLabel="取消选择" onPress={exitSelect}>
+              <ThemedText type="small" themeColor="tint">
+                取消
+              </ThemedText>
+            </Pressable>
+          ) : (
+            <Pressable hitSlop={8} accessibilityLabel="选择任务" onPress={enterSelect}>
+              <ThemedText type="small" themeColor="textSecondary">
+                选择
+              </ThemedText>
+            </Pressable>
+          )}
+          {selecting ? null : (
+            <Pressable hitSlop={8} onPress={() => router.push('/capture?from=inbox')}>
+              <Ionicons name="add" size={24} color={theme.text} />
+            </Pressable>
+          )}
+        </View>
       }
       floating={
         <>
@@ -274,7 +295,7 @@ export default function InboxScreen() {
             - 选择中（有选中项）："已选 N · 删除"
             - 删除后（undoToken 非空）："已删 N 条" + 「撤销」。两者互斥，先删后撤销。
           */}
-          {selectingBucket !== null && selectedIds.size > 0 ? (
+          {selecting && selectedIds.size > 0 ? (
             <View
               style={[
                 styles.selectBar,
@@ -316,9 +337,12 @@ export default function InboxScreen() {
                 accessibilityLabel={`${group.title} ${group.tasks.length} 件`}
                 onPress={() => toggleGroup(group.bucket)}
                 style={({ pressed }) => [styles.groupHead, { opacity: pressed ? 0.6 : 1 }]}>
-                {group.bucket === 'today' ? (
-                  <View style={[styles.todayRing, { borderColor: theme.text }]} />
-                ) : null}
+                {/*
+                  档头只剩三样：档名 · 件数 · 展开箭头。
+                  撤掉的圆环和「选择」都是**同一件事说第二遍** ——
+                  "今天"两个字已经说了圆环在说什么；「选择」在五个档头各出现一次，
+                  等于五个一模一样的入口，而它是个低频动作（收进右上角一处了）。
+                */}
                 <ThemedText type="smallBold" themeColor={isDoneGroup ? 'textSecondary' : 'text'}>
                   {group.title}
                 </ThemedText>
@@ -330,27 +354,6 @@ export default function InboxScreen() {
                   size={14}
                   color={theme.textSecondary}
                 />
-                {selectingBucket === group.bucket ? (
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel="取消选择"
-                    onPress={exitSelect}
-                    hitSlop={6}>
-                    <ThemedText type="small" themeColor="tint">
-                      取消
-                    </ThemedText>
-                  </Pressable>
-                ) : (
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel={`选择 ${group.title} 里的任务`}
-                    onPress={() => enterSelect(group.bucket)}
-                    hitSlop={6}>
-                    <ThemedText type="small" themeColor="textSecondary">
-                      选择
-                    </ThemedText>
-                  </Pressable>
-                )}
               </Pressable>
 
               {open ? (
@@ -365,7 +368,8 @@ export default function InboxScreen() {
                     已完成档整条链路都关（它不该被拖去改期，那等于给做完的事重排时间）。
                   */
                   reorderable={group.bucket === 'someday'}
-                  enabled={!isDoneGroup}
+                  // 选择中不给拖：那一刻每一行都是"选中/取消"，拖拽是另一套动作
+                  enabled={!isDoneGroup && !selecting}
                   dropZone={dropZone}
                   onDropOutside={handleDropOutside}
                   onZoneHover={handleZoneHover}
@@ -388,8 +392,8 @@ export default function InboxScreen() {
                           onComplete={guarded((t) =>
                             isDoneGroup ? void reopenTask(t.id) : void completeTask(t.id),
                           )}
-                          // 这一档进入选择模式时，本行切换成选中态（左侧方框、整行点选）
-                          selecting={selectingBucket === group.bucket}
+                          // 全局选择模式下，每一档的每一行都是"选中态"
+                          selecting={selecting}
                           selected={selectedIds.has(task.id)}
                           onToggleSelect={toggleSelect}
                         />
@@ -452,16 +456,8 @@ const styles = StyleSheet.create({
   },
   /** 档名后面的件数：贴着标题，别被 chevron 推到最右 */
   groupCount: { flex: 1 },
-  /**
-   * "今天"分组头前的小圆环：与月视图的"今天"标记用同一套语言（灰阶、2pt 描边），
-   * 让两处说到"今天"时长一个样。只挂在 today 这一档。
-   */
-  todayRing: {
-    width: 9,
-    height: 9,
-    borderRadius: 5,
-    borderWidth: 2,
-  },
+  /** 页头右上角：低频的「选择」和这一页唯一的「＋」并排 */
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three },
   more: { paddingTop: Spacing.one, fontSize: 12 },
   /** 展开出来的几步：整块跟着父任务那一行，不另起一张卡 */
   children: { gap: Spacing.one, paddingTop: Spacing.one },

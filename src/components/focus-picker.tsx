@@ -30,6 +30,11 @@ import { useTheme } from '@/hooks/use-theme';
  *
  * 刻意只放 5 条：滑动区一旦长了就变成"在轮盘里做筛选"，
  * 那比直接打开列表还慢。超出的一律交给第三个格子。
+ *
+ * ⚠️ 2026-10-13：**撤掉了指针框和下面那排圆点**。
+ * 指针框 + 高亮字 + 圆点本来是**三套话在说同一件事**（"现在停在这一格"），
+ * 而"停在哪一格"这件事本身就由位置表达 —— 字重与明暗已经说得很清楚。
+ * 三套叠在一起不叫强调，叫噪音。
  */
 
 export type FocusPickerOption =
@@ -70,7 +75,6 @@ export function FocusPicker({
   newTitle = '',
   onNewTitleChange,
 }: FocusPickerProps) {
-  const theme = useTheme();
   const scrollRef = useRef<ScrollView>(null);
   const offsetRef = useRef(0);
   /** 惯性是否还在跑（决定"松手后等一拍"要不要真的归位） */
@@ -196,33 +200,6 @@ export function FocusPicker({
             />
           ))}
         </ScrollView>
-
-        {/* 固定的指针：跨在当前这一格上，不随内容移动 */}
-        <View
-          pointerEvents="none"
-          style={[
-            styles.pointer,
-            {
-              left: inset,
-              width: ITEM_WIDTH,
-              borderColor: theme.text,
-            },
-          ]}
-        />
-      </View>
-
-      <View style={styles.dots}>
-        {options.map((item, position) => (
-          <View
-            key={item.key}
-            style={[
-              styles.dot,
-              {
-                backgroundColor: position === centered ? theme.text : theme.backgroundSelected,
-              },
-            ]}
-          />
-        ))}
       </View>
     </View>
   );
@@ -288,7 +265,10 @@ function FocusPickerCell({
         ) : option.kind === 'more' ? (
           <>
             <Ionicons name="add-circle-outline" size={20} color={color} />
-            <ThemedText type="small" themeColor="textSecondary" numberOfLines={1}>
+            <ThemedText
+              type="small"
+              themeColor={active ? 'text' : 'textSecondary'}
+              numberOfLines={1}>
               从全部里挑
             </ThemedText>
           </>
@@ -320,13 +300,6 @@ function FocusPickerCell({
 const styles = StyleSheet.create({
   wrap: { gap: Spacing.two },
   viewport: { height: ITEM_HEIGHT, justifyContent: 'center' },
-  pointer: {
-    position: 'absolute',
-    top: 0,
-    height: ITEM_HEIGHT,
-    borderRadius: Spacing.three,
-    borderWidth: 1,
-  },
   cell: { alignItems: 'center', justifyContent: 'center' },
   cellInner: {
     flex: 1,
@@ -347,6 +320,4 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.one,
     fontSize: 14,
   },
-  dots: { flexDirection: 'row', justifyContent: 'center', gap: Spacing.one },
-  dot: { width: 5, height: 5, borderRadius: 2.5 },
 });

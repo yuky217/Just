@@ -8,6 +8,7 @@ import ReanimatedSwipeable, {
 
 import { Card } from '@/components/card';
 import { CaptureInput } from '@/components/capture-input';
+import { ChoiceSheet, type ChoiceOption } from '@/components/choice-sheet';
 import { EmptyState } from '@/components/empty-state';
 import { TagEditorSheet } from '@/components/tag-editor-sheet';
 import { Screen } from '@/components/screen';
@@ -71,6 +72,13 @@ export default function IdeasScreen() {
    * 收在 `filterIdeas`（domain）里算，页面只负责把三个值喂进去。
    */
   const [range, setRange] = useState<IdeaTimeRange>('all');
+  /*
+    搜索框与筛选面板都收进了页头（2026-10-13）。
+    它们此前各占一行常驻，而默认状态下（「全部」+ 空搜索）一个字都没在说 ——
+    两条纯占位的高度就这样天天挂在列表上面。现在只有"在用"的时候才出现。
+  */
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [filterOpen, setFilterOpen] = useState(false);
   /*
     主列表多选删除。想法页只有主列表会积压（归档箱里一条条删就够了），
     所以选择模式只开在主列表。
@@ -259,6 +267,34 @@ export default function IdeasScreen() {
   /** 当前是不是"在看一部份" —— 空态的文案要区分"库里本来就空"和"筛完没剩" */
   const filtering = Boolean(keyword.trim()) || Boolean(activeTag) || range !== 'all';
 
+  /*
+    筛选面板里只放"时间"（和一条清空）。
+    标签不列在这儿：它在每一行上就是可点的 chip（点一下即按它筛），
+    再在面板里列一遍，等于同一个动作有两个入口，还多一份要同步的列表。
+  */
+  const canClearFilter = Boolean(keyword.trim()) || Boolean(activeTag);
+  const filterOptions = useMemo<ChoiceOption[]>(
+    () => [
+      ...(canClearFilter ? [{ key: '__clear__', label: '清除筛选' }] : []),
+      ...IDEA_TIME_RANGES.map((option) => ({
+        key: `range:${option}`,
+        label: IDEA_TIME_RANGE_LABEL[option],
+      })),
+    ],
+    [canClearFilter],
+  );
+  const handleFilterSelect = useCallback((key: string) => {
+    setFilterOpen(false);
+    if (key === '__clear__') {
+      setKeyword('');
+      setActiveTag(null);
+      setSearchOpen(false);
+      setRange('all');
+      return;
+    }
+    if (key.startsWith('range:')) setRange(key.slice('range:'.length) as IdeaTimeRange);
+  }, []);
+
   return (
     <Screen
       /*
@@ -267,9 +303,64 @@ export default function IdeasScreen() {
         这一页的主角是那些念头，不是它自己的名字。
       */
       right={
-        <Pressable hitSlop={8} onPress={() => router.push('/settings')}>
-          <Ionicons name="settings-outline" size={22} color={theme.textSecondary} />
-        </Pressable>
+        /*
+          页头三个动作：选择 · 搜索 · 筛选。
+          后两个此前是**常驻两行**（一个带框的搜索框、一排四个时间 chip）——
+          而默认状态下它们一个字都没说。搬进页头之后，这一页的顶部只剩记录框。
+          齿轮撤了：设置的家在首页，想法页不放第二处。
+        */
+        <View style={styles.headerActions}>
+          {selectingIdeas ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="取消选择"
+              hitSlop={6}
+              onPress={exitSelectIdeas}>
+              <ThemedText type="small" themeColor="tint">
+                取消
+              </ThemedText>
+            </Pressable>
+          ) : (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="选择想法"
+              hitSlop={6}
+              onPress={enterSelectIdeas}>
+              <ThemedText type="small" themeColor="textSecondary">
+                选择
+              </ThemedText>
+            </Pressable>
+          )}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={searchOpen ? '收起搜索' : '搜索想法'}
+            hitSlop={6}
+            onPress={() => {
+              if (searchOpen) {
+                setKeyword('');
+                setSearchOpen(false);
+              } else {
+                setSearchOpen(true);
+              }
+            }}>
+            <Ionicons
+              name="search-outline"
+              size={21}
+              color={searchOpen ? theme.tint : theme.textSecondary}
+            />
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="筛选"
+            hitSlop={6}
+            onPress={() => setFilterOpen(true)}>
+            <Ionicons
+              name="options-outline"
+              size={21}
+              color={filtering ? theme.tint : theme.textSecondary}
+            />
+          </Pressable>
+        </View>
       }
       floating={
         <>
@@ -318,89 +409,82 @@ export default function IdeasScreen() {
         }}
       />
 
-      <View
-        style={[
-          styles.searchBox,
-          { backgroundColor: theme.backgroundElement, borderColor: theme.backgroundSelected },
-        ]}>
-        <Ionicons name="search" size={16} color={theme.textSecondary} />
-        <TextInput
-          value={keyword}
-          onChangeText={setKeyword}
-          placeholder="按关键词找"
-          placeholderTextColor={theme.textSecondary}
-          style={[styles.searchInput, { color: theme.text }]}
-        />
-        {selectingIdeas ? (
+      {/* 搜索框只在"正在搜"的时候出现 —— 默认它是空的，占着一行什么也没说 */}
+      {searchOpen ? (
+        <View
+          style={[
+            styles.searchBox,
+            { backgroundColor: theme.backgroundElement, borderColor: theme.backgroundSelected },
+          ]}>
+          <Ionicons name="search" size={16} color={theme.textSecondary} />
+          <TextInput
+            autoFocus
+            value={keyword}
+            onChangeText={setKeyword}
+            placeholder="按关键词找"
+            placeholderTextColor={theme.textSecondary}
+            style={[styles.searchInput, { color: theme.text }]}
+          />
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="取消选择"
-            onPress={exitSelectIdeas}
-            hitSlop={6}>
-            <ThemedText type="small" themeColor="tint">
-              取消
-            </ThemedText>
+            accessibilityLabel="收起搜索"
+            hitSlop={6}
+            onPress={() => {
+              setKeyword('');
+              setSearchOpen(false);
+            }}>
+            <Ionicons name="close" size={16} color={theme.textSecondary} />
           </Pressable>
-        ) : (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="选择想法"
-            onPress={enterSelectIdeas}
-            hitSlop={6}>
-            <ThemedText type="small" themeColor="textSecondary">
-              选择
-            </ThemedText>
-          </Pressable>
-        )}
-      </View>
+        </View>
+      ) : null}
 
       {/*
-        筛选行：时间范围（全部 / 今天 / 本周 / 本月）+ 当前标签。
-        都是"点一下"的事 —— 手机上一个点比打字快一个量级，这正是做筛选的理由。
-        两个维度正交：时间管"什么时候记的"，标签管"是关于什么的"，可以同时生效。
+        筛选生效时，才在记录框下面浮出一行可点掉的 chip。
+        三样都是"点一下就撤掉"—— 撤掉比"再打开面板找回来"少两步。
+        关键词那一片在搜索框开着的时候不重复列（那时输入框就在上面）。
       */}
-      <View style={styles.filterRow}>
-        {IDEA_TIME_RANGES.map((option) => {
-          const active = range === option;
-          return (
+      {activeTag || range !== 'all' || (!searchOpen && keyword.trim()) ? (
+        <View style={styles.filterRow}>
+          {range !== 'all' ? (
             <Pressable
-              key={option}
               accessibilityRole="button"
-              accessibilityState={{ selected: active }}
-              accessibilityLabel={`只看${IDEA_TIME_RANGE_LABEL[option]}记下的`}
-              onPress={() => setRange(option)}
-              style={[
-                styles.rangeChip,
-                {
-                  backgroundColor: active ? theme.text : theme.backgroundElement,
-                  borderColor: active ? theme.text : theme.backgroundSelected,
-                },
-              ]}>
-              <ThemedText
-                type="small"
-                style={{ color: active ? theme.background : theme.textSecondary }}>
-                {IDEA_TIME_RANGE_LABEL[option]}
+              accessibilityLabel={`取消只看${IDEA_TIME_RANGE_LABEL[range]}`}
+              onPress={() => setRange('all')}
+              style={[styles.rangeChip, { borderColor: theme.backgroundSelected }]}>
+              <ThemedText type="small" themeColor="textSecondary">
+                {IDEA_TIME_RANGE_LABEL[range]}
               </ThemedText>
+              <Ionicons name="close" size={13} color={theme.textSecondary} />
             </Pressable>
-          );
-        })}
-        {activeTag ? (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`取消按标签「${activeTag}」筛选`}
-            onPress={clearFilter}
-            style={[
-              styles.rangeChip,
-              { backgroundColor: theme.backgroundElement, borderColor: theme.tint },
-            ]}>
-            <Ionicons name="pricetag-outline" size={13} color={theme.tint} />
-            <ThemedText type="small" themeColor="tint">
-              {activeTag}
-            </ThemedText>
-            <Ionicons name="close" size={13} color={theme.textSecondary} />
-          </Pressable>
-        ) : null}
-      </View>
+          ) : null}
+          {activeTag ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`取消按标签「${activeTag}」筛选`}
+              onPress={clearFilter}
+              style={[styles.rangeChip, { borderColor: theme.tint }]}>
+              <Ionicons name="pricetag-outline" size={13} color={theme.tint} />
+              <ThemedText type="small" themeColor="tint">
+                {activeTag}
+              </ThemedText>
+              <Ionicons name="close" size={13} color={theme.textSecondary} />
+            </Pressable>
+          ) : null}
+          {!searchOpen && keyword.trim() ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="清掉关键词"
+              onPress={() => setKeyword('')}
+              style={[styles.rangeChip, { borderColor: theme.backgroundSelected }]}>
+              <Ionicons name="search" size={13} color={theme.textSecondary} />
+              <ThemedText type="small" themeColor="textSecondary" numberOfLines={1}>
+                {keyword.trim()}
+              </ThemedText>
+              <Ionicons name="close" size={13} color={theme.textSecondary} />
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
 
       {visible.length ? (
         <View style={styles.list}>
@@ -501,6 +585,16 @@ export default function IdeasScreen() {
         allTags={allTags}
         onSave={handleSaveTags}
         onClose={closeTagEditor}
+      />
+
+      {/* 筛选面板（页头那个图标弹出来的）：时间范围 + 清除 */}
+      <ChoiceSheet
+        visible={filterOpen}
+        title="筛选想法"
+        options={filterOptions}
+        selectedKey={`range:${range}`}
+        onSelect={handleFilterSelect}
+        onClose={() => setFilterOpen(false)}
       />
     </Screen>
   );
@@ -679,6 +773,8 @@ function IdeaRow({
 }
 
 const styles = StyleSheet.create({
+  /** 页头右上角：选择（词）· 搜索 · 筛选 */
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three },
   searchBox: {
     flexDirection: 'row',
     alignItems: 'center',

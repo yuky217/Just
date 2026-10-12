@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, StyleSheet, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { Card } from '@/components/card';
 import { Fab, FAB_SIZE } from '@/components/fab';
@@ -12,7 +12,7 @@ import { Screen } from '@/components/screen';
 import { ThemedText } from '@/components/themed-text';
 import { ChoiceSheet, type ChoiceOption } from '@/components/choice-sheet';
 import { Spacing } from '@/constants/theme';
-import { hasCheckedInOn, summarizeCheckins } from '@/domain/checkins';
+import { hasCheckedInOn } from '@/domain/checkins';
 import { TaskStatus } from '@/domain/enums';
 import {
   defaultFocusIndex,
@@ -33,7 +33,9 @@ import { formatDateLong, formatDayTime } from '@/utils/datetime';
  *   2. 专注 —— **一个提案**（一件事 + 一句"为什么是它"）+ 一个动作。
  *      提案的规则全在 domain/focus-candidate.ts，页面只负责显示。
  *      挑的规则是"停在哪件就是哪件"，确认只有一个键。
- *   3. 慢事 —— 习惯卡常驻底部，不折叠（折叠等于多一次点击）。
+ *   3. 慢事 —— 课与习惯并成**一块里的两行**，中间一条细线：
+ *      线以上是"现在"（专注是这一屏唯一的重心），以下是"今天的背景"。
+ *      习惯那一行就是今天那几次，点一下即打卡；新建/翻看去独立页（`/habits`）。
  *      纪念日不在这里：它是"一个日子"而不是"一件事"，家在日历页。
  *
  * 立场：**首页要能回答"现在做哪件"，而不是把全部家当摆出来**。
@@ -150,11 +152,6 @@ export default function HomeScreen() {
     }
     return map;
   }, [checkins]);
-
-  const habitDoneToday = useMemo(
-    () => habits.filter((habit) => hasCheckedInOn(checkinKeys.get(habit.id) ?? [], new Date())).length,
-    [habits, checkinKeys],
-  );
 
   /**
    * 问候语按当前时刻现算，不进 useMemo —— 页面挂着跨过午夜 / 久挂后台回来时，
@@ -363,52 +360,81 @@ export default function HomeScreen() {
         </Pressable>
       </Card>
 
-      {/* 慢事：常驻一张卡，不用展开 —— 折叠等于多一次点击 */}
-      {/* 习惯：日常里累积的那部分，不占 Tab，首页给一张卡 */}
+      {/* 慢事：课与习惯同处一块，中间一条细线 —— 线以上是"现在"，以下是"今天的背景" */}
       {habits.length ? (
-        <Card
-          title="习惯"
-          hint={`今天已打卡 ${habitDoneToday}/${habits.length}`}
-          right={
-            <Pressable onPress={() => router.push('/habits')}>
+        <View style={[styles.slowCard, { backgroundColor: theme.backgroundElement }]}>
+          {/* bare + dividerAfter：它退成这块里的第一行，线由它自己画（没课时它整个不渲染） */}
+          <NextCourseCard
+            bare
+            dividerAfter
+            onPress={(courseId) => router.push(`/course/${courseId}`)}
+          />
+          <View style={styles.habitLine}>
+            {/*
+              左端「习惯」通到独立页（管理/翻看），右端「＋」通到新建 ——
+              两个不同的意图，所以是两个入口，不是同一个入口的两种点法。
+              中间那排 chip 就是今天要做的那几次：**点一下即打卡** ——
+              以前是"进卡 → 找到那行 → 点圆圈"，三下变一下。
+            */}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="管理习惯"
+              hitSlop={6}
+              onPress={() => router.push('/habits')}>
               <ThemedText type="small" themeColor="textSecondary">
-                全部
+                习惯
               </ThemedText>
             </Pressable>
-          }>
-          {habits.slice(0, 3).map((habit) => {
-            const keys = checkinKeys.get(habit.id) ?? [];
-            const streak = summarizeCheckins(keys);
-            const done = hasCheckedInOn(keys, new Date());
-            return (
-              <Pressable
-                key={habit.id}
-                accessibilityRole="button"
-                onPress={() => void (done ? undoCheckIn(habit.id) : checkIn(habit.id))}
-                style={styles.habitRow}>
-                <View
-                  style={[
-                    styles.habitCheck,
-                    {
-                      borderColor: done ? theme.text : theme.textSecondary,
-                      backgroundColor: done ? theme.text : 'transparent',
-                    },
-                  ]}>
-                  {done ? (
-                    <Ionicons name="checkmark" size={12} color={theme.background} />
-                  ) : null}
-                </View>
-                <ThemedText type="small" numberOfLines={1} style={styles.habitTitle}>
-                  {habit.title}
-                </ThemedText>
-                <ThemedText type="small" themeColor="textSecondary">
-                  {streak.current ? `连续 ${streak.current} 天` : '还没开始'}
-                </ThemedText>
-              </Pressable>
-            );
-          })}
-        </Card>
-      ) : null}
+            {/* 用一层 flex:1 的 View 兜住 ScrollView：横滑区在 row 里需要一个确定的宽度 */}
+            <View style={styles.habitScroll}>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.habitChips}>
+                {habits.map((habit) => {
+                  const done = hasCheckedInOn(checkinKeys.get(habit.id) ?? [], new Date());
+                  return (
+                    <Pressable
+                      key={habit.id}
+                      accessibilityRole="button"
+                      accessibilityState={{ checked: done }}
+                      accessibilityLabel={
+                        done ? `撤销今天的「${habit.title}」打卡` : `今天「${habit.title}」打卡`
+                      }
+                      onPress={() => void (done ? undoCheckIn(habit.id) : checkIn(habit.id))}
+                      style={[
+                        styles.habitChip,
+                        {
+                          borderColor: done ? theme.text : theme.backgroundSelected,
+                          backgroundColor: done ? theme.text : 'transparent',
+                        },
+                      ]}>
+                      {done ? (
+                        <Ionicons name="checkmark" size={13} color={theme.background} />
+                      ) : null}
+                      <ThemedText
+                        type="small"
+                        numberOfLines={1}
+                        style={{ color: done ? theme.background : theme.textSecondary }}>
+                        {habit.title}
+                      </ThemedText>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+            </View>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="新建习惯"
+              hitSlop={6}
+              onPress={() => router.push('/habits?new=1')}>
+              <Ionicons name="add" size={18} color={theme.tint} />
+            </Pressable>
+          </View>
+        </View>
+      ) : (
+        <NextCourseCard onPress={(courseId) => router.push(`/course/${courseId}`)} />
+      )}
 
       {/* 「＋」那一格的去向：全部还没做完的事，挑一件就把它摆到指针下面 */}
       <ChoiceSheet
@@ -443,14 +469,33 @@ const styles = StyleSheet.create({
     borderRadius: Spacing.two,
     borderWidth: StyleSheet.hairlineWidth,
   },
-  habitTitle: { flex: 1 },
-  habitRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
-  habitCheck: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    borderWidth: 1.5,
+  /**
+   * 课 + 习惯那一块。它是**"今天的背景"**，不是"又一张卡"——
+   * 所以只有一条细线把它和上面（现在）分开，里面不再各给一个框。
+   */
+  slowCard: {
+    borderRadius: Spacing.three,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.one,
+  },
+  /** 习惯那一行：左标签 · 中间可横滑的 chip · 右「＋」 */
+  habitLine: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    gap: Spacing.two,
+    paddingVertical: Spacing.two,
+  },
+  habitChips: { alignItems: 'center', gap: Spacing.two, paddingRight: Spacing.one },
+  habitScroll: { flex: 1 },
+  /** 打卡 chip：没打卡是描边，打了就是实底反白（全 app 同一套"实底＝已做"） */
+  habitChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: Spacing.two,
+    paddingVertical: 4,
+    borderRadius: Spacing.two,
+    borderWidth: StyleSheet.hairlineWidth,
+    maxWidth: 160,
   },
 });

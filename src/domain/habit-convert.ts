@@ -76,6 +76,24 @@ export function describeCadence(cadence: HabitCadence, targetOccurrences: number
   return `每月 ${target} 次`;
 }
 
+/**
+ * 界面上能直接点的几个节奏（习惯页「新建」与任务详情页「转为习惯」共用）。
+ *
+ * 刻意不做"频率 + 次数"的二级表单：这一步唯一要选的是频率，而常见值就这么几个；
+ * 想改次数去详情页的「目标」卡。**两处必须给同一组选项** —— 各写一份的话，
+ * 迟早出现"'每周 5 次'在习惯页有、在任务页没有"这种对不上的事。
+ */
+export const HABIT_CADENCE_PRESETS: ReadonlyArray<{
+  label: string;
+  cadence: HabitCadence;
+  target: number;
+}> = [
+  { label: '每天 1 次', cadence: 'daily', target: 1 },
+  { label: '每周 3 次', cadence: 'weekly', target: 3 },
+  { label: '每周 5 次', cadence: 'weekly', target: 5 },
+  { label: '每月 10 次', cadence: 'monthly', target: 10 },
+];
+
 export function buildHabitConversion(
   task: Pick<Task, 'kind' | 'completion' | 'repeat' | 'targetMinutes' | 'status'>,
   input: ConvertToHabitInput,

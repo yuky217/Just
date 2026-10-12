@@ -59,7 +59,7 @@ import { buildMonthPlan } from '@/domain/month-plan';
 import { parseSchedule } from '@/domain/parse-schedule';
 import { buildPlacedTime, buildRetimedSpanTime, buildRetimedTime, buildTimeOnDay } from '@/domain/schedule-presets';
 import { NO_TIME, taskAnchor, type Task, type TaskTime } from '@/domain/task';
-import { isMuted, isOpenTask, taskDisplayState } from '@/domain/task-state';
+import { isOpenTask } from '@/domain/task-state';
 import { groupTodos } from '@/domain/todo';
 import { useCrossDayDrag, type CrossDayDragGesture } from '@/hooks/use-cross-day-drag';
 import { useTheme } from '@/hooks/use-theme';
@@ -194,7 +194,6 @@ export default function CalendarScreen() {
   const removeExam = useAppStore((state) => state.removeExam);
   /** 课表总开关：关掉后「课」这一栏和日/周里的上课时段一起消失 */
   const timetableOn = useSettings((state) => state.timetableEnabled);
-  const simpleMode = useSettings((state) => state.simpleMode);
 
   const segments = useMemo(
     () => SEGMENTS.filter((segment) => segment.key !== 'timetable' || timetableOn),
@@ -1039,37 +1038,13 @@ export default function CalendarScreen() {
               }`;
 
   /*
-    图例只留"看不出来的手势"。翻页、切视图、点课程块进详情都有可见的按钮或箭头
-    —— 那些不用教（2026-10-07 从三句长说明压到一句十来字）。
-    参考滴答清单：它的列表拖拽同样不做文字说明，靠手势本身和肌肉记忆。
+    ⚠️ 2026-10-13：**图例整块撤掉**（用户拍板）。
+    它此前是页面底部常驻的两行小字（手势说明 + 圆点形状对照 + 灰掉是什么意思），
+    而这三样都是**说明书** —— 说明书该按需出现，不是天天挂在日历底下。
+    手势本身有可见的按钮与箭头（翻页、切视图、点课块都不用手教），
+    "灰掉 = 已完成/已过去"也与列表里那个勾上的圈是同一件事的两种说法。
+    真要教，将来的新手教程统一教一次，比在这里天天占两行强。
   */
-  const legend =
-    mode === 'month'
-      ? '长按一行拖到日期格：改期或安排到那天'
-      : mode === 'week'
-        ? '长按块横拖换天、纵拖换时刻 · 空白处长按拖：新建日程'
-        : mode === 'timetable'
-          ? '点课块：改这一次（调课 / 停课）· 长按拖：改整学期'
-          : '长按块拖动改时刻 · 拽上下边改时长 · 空白处长按拖：新建日程';
-
-  /**
-   * 月历圆点的三种形状，只有**月视图且这张月历上真出现过课或考试**时才解释。
-   *
-   * 为什么不常驻：绝大多数人不看说明，一句常驻的形状对照表只会把图例区撑成两行。
-   * 而"格子上出现了空心点"这件事本身会让人愣一下 —— 那时候说明才有人读。
-   * 课表关掉时「空心点＝课」这句也就没意义了（那天根本不会有空心点）。
-   */
-  const shapeLegend =
-    timetableOn && (courseCountByDay.size || examsByDay.size)
-      ? '圆点：实心＝任务 · 空心＝课 · 方块＝考试'
-      : null;
-
-  /**
-   * 灰掉的是"已经结束"的两类：做完的、以及已经过去的时间段（上周的会）。
-   * 判断复用 domain 的同一份口径，不在这里另写一遍 —— 两边一旦不一致，
-   * 就会出现"图例说有灰的，屏幕上一个都没有"。
-   */
-  const hasMuted = scheduled.some((task) => isMuted(taskDisplayState(task)));
 
   /**
    * 磁吸面板只列两档（见 `docs/未完成与检索方案`）：
@@ -1242,8 +1217,7 @@ export default function CalendarScreen() {
                     </View>
                   </GestureDetector>
                   <Card
-                    title={`${isSameDay(selected, now) ? '今天' : format(selected, 'M月d日')} · ${selectedTasks.length + selectedExams.length} 件`}
-                    hint={selectedTasks.length ? '长按任一行，拖到上面的日期格即可改期' : undefined}>
+                    title={`${isSameDay(selected, now) ? '今天' : format(selected, 'M月d日')} · ${selectedTasks.length + selectedExams.length} 件`}>
                     {/* 纪念日排在最前：它不是"一件事"，是这一天本身的底色 */}
                     {selectedMarks.map((view) => (
                       <Pressable
@@ -1325,49 +1299,35 @@ export default function CalendarScreen() {
                   </Card>
 
                   {/*
-                    纪念日：它的家本来就该是日历 —— 它是"一个日子"，不是"一件事"。
-                    两层呈现：上面月历把"那一次"点出来、点中那天日卡里说清；
-                    这张卡只回答一个问题：最近有什么日子快到了。
+                    纪念日：**整张卡压成一行**（2026-10-13）。
+                    它要回答的只有一句"最近有什么日子快到了"—— 一句话的事，
+                    不值得占一整张卡（那张卡以前还自带标题、提示、三行排版）。
+                    没有快到的日子时这一行也不空着，它就是进纪念日页的入口。
                   */}
-                  <Card
-                    title="纪念日"
-                    hint={upcomingMarks.length ? undefined : '记一个还剩几天的日子'}
-                    right={
-                      <Pressable onPress={() => router.push('/marks')}>
-                        <ThemedText type="small" themeColor="textSecondary">
-                          {marks.length ? '全部' : '去添加'}
-                        </ThemedText>
-                      </Pressable>
-                    }>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="纪念日"
+                    onPress={() => router.push('/marks')}
+                    style={({ pressed }) => [styles.markStrip, { opacity: pressed ? 0.6 : 1 }]}>
+                    <Ionicons name="gift-outline" size={15} color={theme.textSecondary} />
                     {upcomingMarks.length ? (
-                      upcomingMarks.map((view) => (
-                        <Pressable
-                          key={view.mark.id}
-                          accessibilityRole="button"
-                          onPress={() => router.push('/marks')}
-                          style={styles.markRow}>
-                          <View style={styles.markNumberBlock}>
-                            <ThemedText type="smallBold" style={styles.markNumber}>
-                              {view.headline}
-                            </ThemedText>
-                            <ThemedText
-                              type="small"
-                              themeColor="textSecondary"
-                              style={styles.markCaption}>
-                              {view.caption}
-                            </ThemedText>
-                          </View>
-                          <ThemedText type="small" numberOfLines={1} style={styles.markTitle}>
-                            {view.mark.title}
-                          </ThemedText>
-                        </Pressable>
-                      ))
+                      <ThemedText type="small" numberOfLines={1} style={styles.markStripText}>
+                        {markLine(upcomingMarks[0])} · {upcomingMarks[0].mark.title}
+                      </ThemedText>
                     ) : (
-                      <ThemedText type="small" themeColor="textSecondary">
-                        还没有纪念日。生日、考试、在一起多久，都可以记一个。
+                      <ThemedText
+                        type="small"
+                        themeColor="textSecondary"
+                        numberOfLines={1}
+                        style={styles.markStripText}>
+                        {marks.length ? '还没有快到的日子' : '记一个还剩几天的日子'}
                       </ThemedText>
                     )}
-                  </Card>
+                    <ThemedText type="small" themeColor="textSecondary">
+                      {marks.length ? '全部' : '去添加'}
+                    </ThemedText>
+                    <Ionicons name="chevron-forward" size={14} color={theme.textSecondary} />
+                  </Pressable>
                   {/*
                     待办抽屉已移到屏幕底部常驻（见页面外层 bottomBar）——
                     它以前待在滚动流的最末尾，手机上一滚就跑到屏幕外，
@@ -1430,28 +1390,6 @@ export default function CalendarScreen() {
             </Animated.View>
           </Animated.View>
         </GestureDetector>
-
-        {/*
-          图例区。简约模式下整块不渲染：图例是说明书，开简约的人已经不需要它了。
-        */}
-        {simpleMode ? null : (
-          <View style={[styles.legend, { borderColor: theme.backgroundSelected }]}>
-            <ThemedText type="small" themeColor="textSecondary" style={styles.legendText}>
-              {mode === 'timetable'
-                ? legend
-                : scheduled.length
-                  ? hasMuted
-                    ? `${legend}。灰掉的是已完成的、或已经过去的事`
-                    : legend
-                  : '这个范围内还没有安排 —— 换个月份看看，或者记一条带时间的事，它会自动出现在这里并按时提醒你'}
-            </ThemedText>
-            {mode === 'month' && shapeLegend ? (
-              <ThemedText type="small" themeColor="textSecondary" style={styles.legendText}>
-                {shapeLegend}
-              </ThemedText>
-            ) : null}
-          </View>
-        )}
 
         {/* 跟手的浮动块：拖拽期间显示任务标题，位置由 UI 线程直接驱动 */}
         {ghostVisible && draggingTask ? (
@@ -1710,13 +1648,6 @@ const styles = StyleSheet.create({
    * 间距比页面默认（four）紧，两者看着是同一个东西 —— 清单是从月历里拉出来的。
    */
   monthBlock: { gap: Spacing.two },
-  legend: {
-    borderTopWidth: StyleSheet.hairlineWidth,
-    paddingTop: Spacing.two,
-    // 形状说明是第二行，和手势那句之间留一口气；只有一行时 gap 不起作用
-    gap: 2,
-  },
-  legendText: { fontSize: 12, lineHeight: 18, opacity: 0.75 },
   dragRow: { width: '100%' },
   /**
    * 贴底抽屉。刻意不画 Card 那种边框/底色 ——
@@ -1741,11 +1672,14 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.one,
   },
   examTitle: { flex: 1 },
-  markRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three },
-  markNumberBlock: { flexDirection: 'row', alignItems: 'baseline', gap: 3, minWidth: 62 },
-  markNumber: { fontSize: 16, lineHeight: 20, fontVariant: ['tabular-nums'] },
-  markCaption: { fontSize: 11, lineHeight: 14 },
-  markTitle: { flex: 1 },
+  /** 纪念日那一行：一个图标、一句话、一个「全部」、一个箭头 */
+  markStrip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    paddingVertical: Spacing.one,
+  },
+  markStripText: { flex: 1 },
   ghost: {
     position: 'fixed',
     left: 0,
