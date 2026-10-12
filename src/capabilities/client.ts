@@ -1,3 +1,4 @@
+import { breakdownSpec, type BreakdownSuggestion } from './breakdown';
 import { desensitize } from './desensitize';
 import { understandSpec } from './understand';
 import {
@@ -90,9 +91,45 @@ export async function understandText(
   }
 }
 
-/** 已经接了真实实现的能力。其余五项仍是"有开关、没接线"（返回 null，走本地降级） */
+/**
+ * 「让模型替我把这件事拆成几步」。
+ *
+ * ⚠️ 与 `understandText` **恰恰相反，它抛错**：
+ * 理解是记录的**顺带**动作（模型挂了还要能记下来），而拆解是用户**主动点**的动作 ——
+ * 点了一下没反应比"拆不出来"糟糕得多，所以失败必须让用户看得见（面板显示原因 +
+ * 留一条"自己写"的退路）。**吞掉错误在这里等于撒谎。**
+ *
+ * 抛的是 `AiDisabledError`（没开/没配）或 `AiCallError`（网络、密钥、格式），
+ * message 是能直接给用户看的中文。
+ */
+export async function suggestBreakdown(
+  gate: CapabilityGate,
+  text: string,
+  options: { note?: string | null; existing?: readonly string[] } = {},
+): Promise<BreakdownSuggestion> {
+  const context: Record<string, unknown> = {};
+  if (options.note) context.note = options.note;
+  if (options.existing?.length) context.existing = options.existing;
+
+  const res = await callCapability<BreakdownSuggestion>(gate, {
+    capability: AiCapability.Breakdown,
+    text,
+    context,
+  });
+  /*
+   * 一条步骤都没洗出来 = 这次拆解不成立，走错误分支让界面给退路。
+   * 不返回空数组：界面收到 `[]` 会摊一张空白面板，用户只会以为"点了没反应"。
+   */
+  if (!res.data || !res.data.steps.length) {
+    throw new AiCallError('模型没拆出可用的步骤，自己写也一样');
+  }
+  return res.data;
+}
+
+/** 已经接了真实实现的能力。其余四项仍是"有开关、没接线"（返回 null，走本地降级） */
 const CAPABILITY_SPECS: Partial<Record<AiCapability, CapabilitySpec<unknown>>> = {
   [AiCapability.Understand]: understandSpec,
+  [AiCapability.Breakdown]: breakdownSpec,
 };
 
 /** 默认超时。手机上等 15 秒已经是耐心的上限，再久不如退回本地识别 */
@@ -138,8 +175,13 @@ export async function callCapability<T>(
 
   const parsed = spec.parse(json, { text: sentText, now });
   if (parsed == null) {
-    // 少了名字 / 时间不成形 —— 这份结果不能用。**不猜**，退回本地识别
-    throw new AiCallError('模型返回的内容不完整，已改用本地识别');
+    /*
+     * 少了名字 / 时间不成形 / 一条步骤都没洗出来 —— 这份结果不能用。**不猜**。
+     *
+     * 措辞刻意不写"已改用本地识别"：那只对「理解」成立（它真有本地正则兜底），
+     * 而「拆解」没有本地降级，说"改用"是在承诺一件没做的事。
+     */
+    throw new AiCallError('模型返回的内容不完整，这次没用上');
   }
 
   return {

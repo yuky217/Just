@@ -41,6 +41,11 @@ export const AI_CAPABILITIES: readonly AiCapabilityMeta[] = [
     description: '自动判断该进想法库还是待办',
   },
   {
+    /**
+     * ✅ **已接线**（2026-10-12）：任务详情页与想法页的「AI 拆」用它。
+     * ⚠️ 但拆解**没有本地降级** —— 这个能力关掉或没配接口，那两个入口
+     * 就**完全不出现**（界面不许拿没接线的开关承诺任何事）。
+     */
     id: AiCapability.Breakdown,
     name: '拆解',
     description: '把大任务拆成能立刻动手的步骤',

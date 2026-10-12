@@ -242,12 +242,61 @@ describe('callCapability（理解）', () => {
     ).rejects.toThrow(/没有按要求返回 JSON.*抱歉/s);
   });
 
-  it('还没接线的能力（如拆解）→ 不报错、给 null，界面继续走本地路径', async () => {
-    const res = await callCapability(gate({}, [AiCapability.Breakdown]), {
-      capability: AiCapability.Breakdown,
-      text: '写论文',
+  it('还没接线的能力（如语义检索）→ 不报错、给 null，界面继续走本地路径', async () => {
+    const res = await callCapability(gate({}, [AiCapability.SemanticSearch]), {
+      capability: AiCapability.SemanticSearch,
+      text: '上次那个想法',
     });
     expect(res.data).toBeNull();
     expect(captured).toHaveLength(0); // 压根没发请求
+  });
+});
+
+/*
+ * 拆解是**第二个接了真实模型的能力**（2026-10-12）。
+ *
+ * 与「理解」最大的差别：理解失败可以静默退回本地正则，拆解**没有本地降级** ——
+ * 所以这里的每一条失败都必须变成一个能给用户看的错误，而不是 null。
+ * 界面拿不到"失败"这个信息，就只能显示一张空白面板，用户以为点了没反应。
+ */
+describe('callCapability（拆解）', () => {
+  it('正常拆出几步', async () => {
+    modelReply = JSON.stringify({ steps: ['定题目', '找三篇文献', '写大纲'] });
+    const res = await callCapability<{ steps: string[] }>(
+      gate({}, [AiCapability.Breakdown]),
+      { capability: AiCapability.Breakdown, text: '写毕业论文' },
+    );
+    expect(res.data!.steps).toEqual(['定题目', '找三篇文献', '写大纲']);
+  });
+
+  it('已有的步骤会写进提示词，避免它把做过的事再建议一遍', async () => {
+    modelReply = JSON.stringify({ steps: ['写大纲'] });
+    await callCapability(gate({}, [AiCapability.Breakdown]), {
+      capability: AiCapability.Breakdown,
+      text: '写毕业论文',
+      context: { existing: ['定题目'] },
+    });
+    const sent = captured[0]!.body.messages?.find((m) => m.role === 'user');
+    expect(sent?.content).toContain('定题目');
+  });
+
+  it('一条步骤都洗不出来（全空/全是空格）→ 抛错，界面才有得可退', async () => {
+    modelReply = JSON.stringify({ steps: ['  ', ''] });
+    await expect(
+      callCapability(gate({}, [AiCapability.Breakdown]), {
+        capability: AiCapability.Breakdown,
+        text: '写毕业论文',
+      }),
+    ).rejects.toThrow(AiCallError);
+  });
+
+  it('steps 不是数组 → 抛错（不是"拆出零步"，是这份结果不能用）', async () => {
+    modelReply = JSON.stringify({ steps: '定题目' });
+    await expect(
+      callCapability(gate({}, [AiCapability.Breakdown]), {
+        capability: AiCapability.Breakdown,
+        text: '写毕业论文',
+      }),
+    ).rejects.toThrow(AiCallError);
   });
 });

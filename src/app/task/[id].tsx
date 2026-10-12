@@ -3,6 +3,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, TextInput, View } from 'react-native';
 
+import { BreakdownSheet } from '@/components/breakdown-sheet';
 import { Card } from '@/components/card';
 import {
   DateTimePickerBody,
@@ -40,8 +41,11 @@ import { buildScheduleTime, SCHEDULE_PRESETS } from '@/domain/schedule-presets';
 import { subtaskProgress } from '@/domain/subtask-progress';
 import { taskDisplayState } from '@/domain/task-state';
 import { taskAnchor, isAllDay, type RepeatRule, type Task, type TaskTime } from '@/domain/task';
+import { suggestBreakdown } from '@/capabilities/client';
+import { AiCapability } from '@/capabilities/types';
 import { useTheme } from '@/hooks/use-theme';
 import { useAppStore } from '@/state/app-store';
+import { selectCapabilityGate, useSettings } from '@/state/settings-store';
 import { describeDue, formatDayTime } from '@/utils/datetime';
 
 /**
@@ -110,6 +114,14 @@ export default function TaskDetailScreen() {
   const toggleSubtaskAction = useAppStore((state) => state.setSubtaskDone);
   const deleteSubtaskAction = useAppStore((state) => state.removeSubtask);
 
+  /*
+   * AI 拆的入口**只在能力真的开着且配了接口时才出现**。
+   * 不显示一个点了会报错的按钮 —— 拆解没有本地降级，能力关掉时
+   * 那个入口就是一句假承诺（与「语义检索」那条教训同一个道理）。
+   */
+  const gate = useSettings(selectCapabilityGate);
+  const canAiBreakdown = gate.enabled[AiCapability.Breakdown];
+
   const [task, setTask] = useState<Task | null>(null);
   /**
    * 动作完成后留一句回声（"已转成打卡""已挪到明天 14:00"）——
@@ -142,6 +154,7 @@ export default function TaskDetailScreen() {
   const subtaskInputRef = useRef<TextInput>(null);
   const [loading, setLoading] = useState(true);
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [breakdownOpen, setBreakdownOpen] = useState(false);
   const [sheetView, setSheetView] = useState<SheetView>('main');
   /**
    * 时间调整栏的草稿。栏是常驻的（不再藏进"自定义"），所以页面一进来就得有一份：
@@ -247,6 +260,32 @@ export default function TaskDetailScreen() {
       await reloadAfterSubtaskChange();
     },
     [deleteSubtaskAction, reloadAfterSubtaskChange],
+  );
+
+  /*
+   * 「AI 拆」：把这件事交给模型先拆一版，用户改完才落库。
+   *
+   * 已有的步骤一并传给它 —— 否则它会把「查文献」再建议一遍，
+   * 而用户看见重复只会觉得这玩意没用。
+   */
+  const generateBreakdown = useCallback(async (): Promise<string[]> => {
+    if (!id || !task) return [];
+    const res = await suggestBreakdown(gate, task.title, {
+      note: task.note,
+      existing: subtasks.map((child) => child.title),
+    });
+    return res.steps;
+  }, [id, task, gate, subtasks]);
+
+  /** 一次性建多步：走 `addSubtasks`（只 refresh 一次），不一条条往外蹦 */
+  const submitBreakdown = useCallback(
+    async (steps: readonly string[]) => {
+      if (!id || !steps.length) return;
+      await addSubtasksAction(id, steps);
+      setBreakdownOpen(false);
+      await reloadAfterSubtaskChange();
+    },
+    [id, addSubtasksAction, reloadAfterSubtaskChange],
   );
 
   /** 乐观更新：先改本地，再写库 */
@@ -910,6 +949,19 @@ export default function TaskDetailScreen() {
                 subtaskProgress(subtasks).allDone ? ' · 已全部完成' : ''
               }`
             : '一行一步，一次可以写好几步'
+        }
+        right={
+          canAiBreakdown ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="让 AI 先拆一版"
+              hitSlop={6}
+              onPress={() => setBreakdownOpen(true)}
+              style={styles.aiBreakdownButton}>
+              <Ionicons name="sparkles-outline" size={14} color={theme.text} />
+              <ThemedText type="smallBold">AI 拆</ThemedText>
+            </Pressable>
+          ) : null
         }>
         {subtasks.map((child) => (
           <View key={child.id} style={styles.subtaskRow}>
@@ -1227,6 +1279,15 @@ export default function TaskDetailScreen() {
           </Pressable>
         </>
 
+      <BreakdownSheet
+        visible={breakdownOpen}
+        subject={task?.title ?? ''}
+        note={task?.note ?? null}
+        onGenerate={generateBreakdown}
+        onSubmit={(steps) => void submitBreakdown(steps)}
+        onClose={() => setBreakdownOpen(false)}
+      />
+
       <ScheduleSheet
         task={sheetOpen ? task : null}
         initialView={sheetView}
@@ -1361,6 +1422,14 @@ const styles = StyleSheet.create({
   },
   linkRow: { paddingVertical: Spacing.one },
   subtaskRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
+  aiBreakdownButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.one,
+    paddingHorizontal: Spacing.two,
+    paddingVertical: Spacing.one,
+    borderRadius: Spacing.two,
+  },
   subtaskCheck: {
     width: 20,
     height: 20,

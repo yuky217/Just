@@ -6,13 +6,17 @@ import { Pressable, StyleSheet, TextInput, View } from 'react-native';
 import { Card } from '@/components/card';
 import { CaptureInput } from '@/components/capture-input';
 import { EmptyState } from '@/components/empty-state';
+import { BreakdownSheet } from '@/components/breakdown-sheet';
 import { IdeaBreakdownSheet } from '@/components/idea-breakdown-sheet';
+import { suggestBreakdown } from '@/capabilities/client';
+import { AiCapability } from '@/capabilities/types';
 import { Screen } from '@/components/screen';
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import type { Idea } from '@/domain/idea';
 import { useTheme } from '@/hooks/use-theme';
 import { useAppStore } from '@/state/app-store';
+import { selectCapabilityGate, useSettings } from '@/state/settings-store';
 import { formatMonthDay } from '@/utils/datetime';
 
 /**
@@ -86,6 +90,20 @@ export default function IdeasScreen() {
    * 拆过之后**不再让拆第二次**：追加步骤走任务详情页已有的子任务能力，
    * 那才是唯一入口。同一件事开两条路，最后一定会出现"从这边加的和从那边加的对不上"。
    */
+  /*
+   * AI 拆解开着时，点一行走 **AI 面板**（`BreakdownSheet`）—— 它本来就能自己写，
+   * 所以不需要再给用户一个「帮我拆 / 我自己写」的选择：选哪条路是我们要替他决定的。
+   * 能力没开就走原来的手写面板，两个入口的落库出口是同一个 `breakdownIdea`。
+   */
+  const gate = useSettings(selectCapabilityGate);
+  const canAiBreakdown = gate.enabled[AiCapability.Breakdown];
+
+  const generateBreakdown = async (): Promise<string[]> => {
+    if (!breaking) return [];
+    const res = await suggestBreakdown(gate, breaking.content);
+    return res.steps;
+  };
+
   const openIdea = (idea: Idea) => {
     const parent = parentOf(idea);
     if (parent) {
@@ -239,16 +257,30 @@ export default function IdeasScreen() {
         拆解面板。交出去之后**不跳走** —— 行上立刻多出「已拆成 N 步」，
         那行本身就是回执；跳进任务详情会把"接着拆下一条想法"打断。
       */}
-      <IdeaBreakdownSheet
-        visible={breaking !== null}
-        idea={breaking}
-        onClose={() => setBreaking(null)}
-        onSubmit={(steps) => {
-          const target = breaking;
-          setBreaking(null);
-          if (target) void breakdownIdea(target.id, steps);
-        }}
-      />
+      {canAiBreakdown ? (
+        <BreakdownSheet
+          visible={breaking !== null}
+          subject={breaking?.content ?? ''}
+          onGenerate={generateBreakdown}
+          onClose={() => setBreaking(null)}
+          onSubmit={(steps) => {
+            const target = breaking;
+            setBreaking(null);
+            if (target) void breakdownIdea(target.id, steps);
+          }}
+        />
+      ) : (
+        <IdeaBreakdownSheet
+          visible={breaking !== null}
+          idea={breaking}
+          onClose={() => setBreaking(null)}
+          onSubmit={(steps) => {
+            const target = breaking;
+            setBreaking(null);
+            if (target) void breakdownIdea(target.id, steps);
+          }}
+        />
+      )}
     </Screen>
   );
 }
