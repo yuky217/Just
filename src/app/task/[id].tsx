@@ -38,10 +38,10 @@ import { describePastWindow, planEventShift, toLooseTodo } from '@/domain/past-e
 import { describeNextFire } from '@/domain/reminder';
 import { describeReminder, describeRepeat } from '@/domain/repeat-next';
 import { buildScheduleTime, SCHEDULE_PRESETS } from '@/domain/schedule-presets';
-import { subtaskProgress } from '@/domain/subtask-progress';
+import { subtaskProgress, undoableBreakdown } from '@/domain/subtask-progress';
 import { taskDisplayState } from '@/domain/task-state';
 import { taskAnchor, isAllDay, type RepeatRule, type Task, type TaskTime } from '@/domain/task';
-import { suggestBreakdown } from '@/capabilities/client';
+import { isCapabilityReady, suggestBreakdown } from '@/capabilities/client';
 import { AiCapability } from '@/capabilities/types';
 import { useTheme } from '@/hooks/use-theme';
 import { useAppStore } from '@/state/app-store';
@@ -111,6 +111,8 @@ export default function TaskDetailScreen() {
   const undoCheckInAction = useAppStore((state) => state.undoCheckIn);
   const loadSubtasksAction = useAppStore((state) => state.loadSubtasks);
   const addSubtasksAction = useAppStore((state) => state.addSubtasks);
+  const breakdownIntoAction = useAppStore((state) => state.breakdownInto);
+  const undoBreakdownAction = useAppStore((state) => state.undoBreakdown);
   const toggleSubtaskAction = useAppStore((state) => state.setSubtaskDone);
   const deleteSubtaskAction = useAppStore((state) => state.removeSubtask);
 
@@ -120,7 +122,7 @@ export default function TaskDetailScreen() {
    * 那个入口就是一句假承诺（与「语义检索」那条教训同一个道理）。
    */
   const gate = useSettings(selectCapabilityGate);
-  const canAiBreakdown = gate.enabled[AiCapability.Breakdown];
+  const canAiBreakdown = isCapabilityReady(gate, AiCapability.Breakdown);
 
   const [task, setTask] = useState<Task | null>(null);
   /**
@@ -263,6 +265,22 @@ export default function TaskDetailScreen() {
   );
 
   /*
+   * 可撤销的那一次拆解（最新那批）。
+   *
+   * 不给它单独存状态：**从子任务现算** —— 用户删掉了几步、又手写加了几步，
+   * 算出来的仍然是"这批还剩几条"，不需要额外维护一份很容易和库对不上的记录。
+   */
+  const undoBatch = useMemo(() => undoableBreakdown(subtasks), [subtasks]);
+
+  const handleUndoBreakdown = useCallback(async () => {
+    if (!id || !undoBatch) return;
+    await undoBreakdownAction(id, undoBatch.batch);
+    await reloadAfterSubtaskChange();
+    // 撤完之后这一行本身会消失（没有批次了），不留一句话用户会以为没生效
+    setFlash({ icon: 'arrow-undo', message: `撤掉了这次拆出来的 ${undoBatch.count} 步` });
+  }, [id, undoBatch, undoBreakdownAction, reloadAfterSubtaskChange]);
+
+  /*
    * 「AI 拆」：把这件事交给模型先拆一版，用户改完才落库。
    *
    * 已有的步骤一并传给它 —— 否则它会把「查文献」再建议一遍，
@@ -277,15 +295,32 @@ export default function TaskDetailScreen() {
     return res.steps;
   }, [id, task, gate, subtasks]);
 
-  /** 一次性建多步：走 `addSubtasks`（只 refresh 一次），不一条条往外蹦 */
+  /**
+   * 一次性建多步：走 `breakdownInto`（只 refresh 一次），不一条条往外蹦。
+   *
+   * 用 `breakdownInto` 而不是 `addSubtasks`，差别就是那几步会带上**同一个批次标记** ——
+   * 手写一条条加的子项没有标记，于是「撤销拆解」只撤这一下，不会顺手删掉用户自己写的。
+   */
   const submitBreakdown = useCallback(
     async (steps: readonly string[]) => {
       if (!id || !steps.length) return;
-      await addSubtasksAction(id, steps);
-      setBreakdownOpen(false);
-      await reloadAfterSubtaskChange();
+      try {
+        await breakdownIntoAction(id, steps);
+        setBreakdownOpen(false);
+        await reloadAfterSubtaskChange();
+      } catch (err) {
+        /*
+         * 落库这一步**不给它崩**：模型那一步的失败已经由面板兜住了
+         * （显示原因 + 还能自己写），要是最后写入失败反而把整个页面掀了，
+         * 用户前面改的那几步就白改了。写不进去就说一句，步骤还在面板上。
+         */
+        setFlash({
+          icon: 'warning-outline',
+          message: err instanceof Error ? err.message : '这几步没能存下来，再试一次',
+        });
+      }
     },
-    [id, addSubtasksAction, reloadAfterSubtaskChange],
+    [id, breakdownIntoAction, reloadAfterSubtaskChange],
   );
 
   /** 乐观更新：先改本地，再写库 */
@@ -954,12 +989,12 @@ export default function TaskDetailScreen() {
           canAiBreakdown ? (
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="让 AI 先拆一版"
+              accessibilityLabel="拆解成几步"
               hitSlop={6}
               onPress={() => setBreakdownOpen(true)}
               style={styles.aiBreakdownButton}>
               <Ionicons name="sparkles-outline" size={14} color={theme.text} />
-              <ThemedText type="smallBold">AI 拆</ThemedText>
+              <ThemedText type="smallBold">拆解</ThemedText>
             </Pressable>
           ) : null
         }>
@@ -1003,6 +1038,18 @@ export default function TaskDetailScreen() {
             </Pressable>
           </View>
         ))}
+
+        {undoBatch ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`撤销拆解，删掉这次拆出来的 ${undoBatch.count} 步`}
+            onPress={() => void handleUndoBreakdown()}
+            style={styles.linkRow}>
+            <ThemedText type="small" themeColor="textSecondary">
+              撤销拆解 · 删掉这次拆出来的 {undoBatch.count} 步
+            </ThemedText>
+          </Pressable>
+        ) : null}
 
         {/*
           一次一条，但**提交后不清场**：输入框清空、焦点还在，接着写下一条。

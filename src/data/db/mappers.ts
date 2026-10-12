@@ -115,6 +115,7 @@ export interface TaskRow extends BaseRow {
   reminder_minutes_before: number | null;
   parent_task_id: string | null;
   sort_order: number | null;
+  breakdown_batch_id: string | null;
   progress_json: string;
 }
 
@@ -149,6 +150,7 @@ export function taskFromRow(row: TaskRow): Task {
     reminderMinutesBefore: row.reminder_minutes_before,
     parentId: row.parent_task_id ?? null,
     sortOrder: row.sort_order ?? null,
+    breakdownBatch: row.breakdown_batch_id ?? null,
     // 老数据里可能还留着 occurrencesThisPeriod（v3 之前存过"本期次数"，已废弃）。
     // 显式挑出认识的字段，而不是整块信 JSON —— 废弃字段会在任何用到它的地方悄悄生效。
     progress: normalizeProgress(parseJson<Partial<TaskProgress>>(row.progress_json, {})),
@@ -184,6 +186,7 @@ export function taskColumns(task: Task): ColumnMap {
     reminder_minutes_before: task.reminderMinutesBefore ?? null,
     parent_task_id: task.parentId ?? null,
     sort_order: task.sortOrder ?? null,
+    breakdown_batch_id: task.breakdownBatch ?? null,
     progress_json: JSON.stringify(task.progress),
     ...writeBase(task),
   };

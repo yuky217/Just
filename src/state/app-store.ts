@@ -32,6 +32,7 @@ import {
   createSubtask,
   createTask,
   createTerm,
+  newBreakdownBatch,
 } from '@/domain/factory';
 import {
   applyFocusToTask,
@@ -212,8 +213,25 @@ interface AppState {
    * 十条子项刷十次页面，会看到列表一条条蹦出来，像是卡了。
    */
   addSubtasks: (parentId: string, titles: readonly string[]) => Promise<Task[]>;
+  /**
+   * 一次拆解整批落库：这几条带**同一个批次标记**，可以一键整批撤销。
+   *
+   * 与 addSubtasks 的区别就是那个标记 —— 手写一条条加的步骤不该被
+   * "撤销拆解"顺手删掉，所以批次只在走拆解这条路的入口上打。
+   */
+  breakdownInto: (parentId: string, steps: readonly string[]) => Promise<Task[]>;
+  /**
+   * 撤销一次拆解：删掉带这个批次的所有子任务。
+   *
+   * 整批删而不是留着让用户一条条删：他要撤销的是"这一下"，
+   * 不是"这三条"。删完重算父任务完成态（全部子任务没了，
+   * 父任务不该停在"已完成"）。
+   */
+  undoBreakdown: (parentId: string, batch: string) => Promise<number>;
   setSubtaskDone: (subtaskId: string, done: boolean) => Promise<void>;
   removeSubtask: (subtaskId: string) => Promise<void>;
+  /** 待办页用：一次取多个父任务的子任务（避免每行各查一次库） */
+  loadSubtasksOf: (parentIds: readonly string[]) => Promise<Record<string, Task[]>>;
 
   /** 手动排序：按新的 id 顺序写库 */
   reorderTasks: (ids: readonly string[]) => Promise<void>;
@@ -562,8 +580,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
     await taskRepository.create(parent);
 
+    // 整批带同一个标记：从想法拆出来的几步同样要能一键撤销
+    // （去那件事的详情页点「撤销拆解」）
+    const batch = newBreakdownBatch();
     for (const title of plan.steps) {
-      await taskRepository.create(createSubtask(parent.id, title));
+      await taskRepository.create(createSubtask(parent.id, title, batch));
     }
 
     // 指针回写到想法上：这是"拆过"的唯一凭据（步数不存，问子任务表要）
@@ -624,6 +645,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   loadSubtasks: async (parentId) => taskRepository.listSubtasks(parentId),
 
+  loadSubtasksOf: async (parentIds) => {
+    const map = await taskRepository.listSubtasksOf(parentIds);
+    return Object.fromEntries(map);
+  },
+
   addSubtask: async (parentId, title) => {
     const subtask = createSubtask(parentId, title);
     await taskRepository.create(subtask);
@@ -639,6 +665,29 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     await get().refresh();
     return created;
+  },
+
+  breakdownInto: async (parentId, steps) => {
+    if (!steps.length) return [];
+    const batch = newBreakdownBatch();
+    const created = steps.map((title) => createSubtask(parentId, title, batch));
+    for (const subtask of created) {
+      await taskRepository.create(subtask);
+    }
+    await get().refresh();
+    return created;
+  },
+
+  undoBreakdown: async (parentId, batch) => {
+    const children = await taskRepository.listSubtasks(parentId);
+    const batchRows = children.filter((child) => child.breakdownBatch === batch);
+    for (const child of batchRows) {
+      await taskRepository.softDelete(child.id);
+    }
+    // 子任务可能全没了 —— 父任务不能停在"已完成"（那是被子任务推出来的）
+    await get().syncParentStatus(parentId);
+    await get().refresh();
+    return batchRows.length;
   },
 
   setSubtaskDone: async (subtaskId, done) => {

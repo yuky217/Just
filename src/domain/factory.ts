@@ -66,6 +66,8 @@ export interface CreateTaskInput {
   parentId?: string | null;
   /** 手动排序权重；不传 = 还没排过（按创建时间倒序） */
   sortOrder?: number | null;
+  /** 拆解批次：同一次拆解出来的子任务共用，为了能整批撤销 */
+  breakdownBatch?: string | null;
 }
 
 export function createTask(input: CreateTaskInput): Task {
@@ -91,6 +93,7 @@ export function createTask(input: CreateTaskInput): Task {
     reminderMinutesBefore: input.reminderMinutesBefore ?? null,
     parentId: input.parentId ?? null,
     sortOrder: input.sortOrder ?? null,
+    breakdownBatch: input.breakdownBatch ?? null,
     progress: { accumulatedMinutes: 0 },
   };
 }
@@ -102,13 +105,23 @@ export function createTask(input: CreateTaskInput): Task {
  * 给每个子任务自动派一份时间，等于替用户排了一遍程 —— 那是排程算法该做的事，
  * 不是创建子任务时该做的。子任务的 kind 固定为执行型（拆出来的都是要动手的事）。
  */
-export function createSubtask(parentId: string, title: string): Task {
+export function createSubtask(parentId: string, title: string, batchId?: string): Task {
   return createTask({
     title,
     kind: TaskKind.Execution,
     parentId,
+    // 整批拆解时带批次：撤销拆解要能按这一批一次性删干净（详见 Task.breakdownBatch）
+    breakdownBatch: batchId ?? null,
   });
 }
+
+/**
+ * 一次拆解的批次 id。
+ *
+ * 前缀 `bd_` 是为了在备份 JSON 里一眼看出这串 id 是批次（不是某个任务 id）。
+ * 不需要有序、不需要可读，只要这一次和那一次不一样。
+ */
+export const newBreakdownBatch = (): string => createId('bd');
 
 /** 没显式给时间属性时，按"有没有时间"倒推 */
 function normalizeTime(kind: TaskKind, input: CreateTaskInput): TaskTime {

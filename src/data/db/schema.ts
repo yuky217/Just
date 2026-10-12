@@ -10,7 +10,7 @@
  * **顺序不能换**，原因见 INDEXES 上的注释（换过，代价是升级后 App 直接起不来）。
  */
 
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 
 /** 表名集中放这里，避免各处硬编码字符串写错 */
 export const TABLES = {
@@ -86,6 +86,8 @@ CREATE TABLE IF NOT EXISTS ${TABLES.tasks} (
   reminder_minutes_before INTEGER,
   parent_task_id    TEXT,
   sort_order        REAL,
+  /** 拆解批次：同一批 AI 拆出来的子任务共用一个 id，为了能整批撤销。必须与 MIGRATIONS 10 同步加 */
+  breakdown_batch_id TEXT,
   progress_json     TEXT NOT NULL DEFAULT '{"accumulatedMinutes":0}',
   ${COMMON_COLUMNS}
 );
@@ -306,4 +308,18 @@ export const MIGRATIONS: Readonly<Record<number, readonly string[]>> = {
    * **可空**（NULL = 不是全天），于是老数据不用回填：存量任务读出来跟以前完全一样。
    */
   9: [`ALTER TABLE ${TABLES.tasks} ADD COLUMN all_day INTEGER`],
+  /**
+   * v10 = tasks 加 breakdown_batch_id（拆解批次）。
+   *
+   * AI 拆出来的几步必须**能整批撤回**：它们是一次动作的产物，用户要撤销的是
+   * "这一次拆解"，不是"逐条删掉三条"。所以落库时给这几条打同一个批次 id，
+   * 撤销就是"删掉带这个 id 的那些行"。
+   *
+   * ⚠️ 刻意**不叫 source**：source 记的是"从哪个入口进来的"（手动 / 通知 / 导入），
+   * 已经有了语义（导入整表替换时要靠它保住手动加的考试）。批次是**这一次的动作**，
+   * 跟入口没关系 —— 手写拆出来的步骤也可以带批次。
+   *
+   * **可空**，老数据不用回填：以前拆出来的步骤读出来跟以前一样（只是没有批次可撤）。
+   */
+  10: [`ALTER TABLE ${TABLES.tasks} ADD COLUMN breakdown_batch_id TEXT`],
 };

@@ -5,7 +5,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { bootstrapDatabase, type BootstrapDb, type SqlParams } from '@/data/db/bootstrap';
 import { TaskKind, TaskStatus, TimeAttribute } from '@/domain/enums';
-import { createTask } from '@/domain/factory';
+import { createSubtask, createTask, newBreakdownBatch } from '@/domain/factory';
+import { undoableBreakdown } from '@/domain/subtask-progress';
 import type { Task } from '@/domain/task';
 import { groupTodos } from '@/domain/todo';
 
@@ -143,6 +144,28 @@ describe('taskRepository 的查询口径', () => {
 
     expect(await inboxPageIds()).toEqual([parent.id]);
     expect((await taskRepository.listAll()).map((t) => t.id)).toEqual([parent.id]);
+  });
+
+  it('⭐ 拆解批次能落库再读回来 —— 整批撤销全靠这一列', async () => {
+    const parent = untimed();
+    await taskRepository.create(parent);
+    const batch = newBreakdownBatch();
+    const first = createSubtask(parent.id, '定题目', batch);
+    const second = createSubtask(parent.id, '查文献', batch);
+    const handWritten = createSubtask(parent.id, '自己想起的一步');
+    await taskRepository.create(first);
+    await taskRepository.create(second);
+    await taskRepository.create(handWritten);
+
+    const kids = await taskRepository.listSubtasks(parent.id);
+    expect(kids).toHaveLength(3);
+    expect(kids.filter((k) => k.breakdownBatch === batch).map((k) => k.title)).toEqual([
+      '定题目',
+      '查文献',
+    ]);
+    // 手写加的那一步没有批次 —— 撤销拆解不能顺手删掉它
+    expect(kids.find((k) => k.id === handWritten.id)?.breakdownBatch ?? null).toBeNull();
+    expect(undoableBreakdown(kids)).toEqual({ batch, count: 2 });
   });
 
   it('重新打开之后又回「还没排时间」档（撤销完成是个来回，不是单向门）', async () => {

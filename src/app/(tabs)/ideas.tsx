@@ -8,7 +8,7 @@ import { CaptureInput } from '@/components/capture-input';
 import { EmptyState } from '@/components/empty-state';
 import { BreakdownSheet } from '@/components/breakdown-sheet';
 import { IdeaBreakdownSheet } from '@/components/idea-breakdown-sheet';
-import { suggestBreakdown } from '@/capabilities/client';
+import { isCapabilityReady, suggestBreakdown } from '@/capabilities/client';
 import { AiCapability } from '@/capabilities/types';
 import { Screen } from '@/components/screen';
 import { ThemedText } from '@/components/themed-text';
@@ -96,7 +96,7 @@ export default function IdeasScreen() {
    * 能力没开就走原来的手写面板，两个入口的落库出口是同一个 `breakdownIdea`。
    */
   const gate = useSettings(selectCapabilityGate);
-  const canAiBreakdown = gate.enabled[AiCapability.Breakdown];
+  const canAiBreakdown = isCapabilityReady(gate, AiCapability.Breakdown);
 
   const generateBreakdown = async (): Promise<string[]> => {
     if (!breaking) return [];

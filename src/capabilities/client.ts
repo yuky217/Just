@@ -55,10 +55,21 @@ export class AiCallError extends Error {
   }
 }
 
-export function assertCapabilityEnabled(gate: CapabilityGate, capability: AiCapability): void {
+/**
+ * 这个能力**此刻能不能真的用**：开关开了，并且接口地址与模型都填了。
+ *
+ * 界面必须拿它决定"入口出不出来"，不能只看 `gate.enabled` ——
+ * 只开开关、没配接口时那个入口点了必然报错，等于界面在承诺一件做不到的事。
+ * 判定只有这一处定义，断言和界面共用，免得两边口径走偏。
+ */
+export function isCapabilityReady(gate: CapabilityGate, capability: AiCapability): boolean {
   const allowed = gate.enabled[capability];
   const configured = gate.config.endpoint.trim().length > 0 && gate.config.model.trim().length > 0;
-  if (!allowed || !configured) {
+  return Boolean(allowed && configured);
+}
+
+export function assertCapabilityEnabled(gate: CapabilityGate, capability: AiCapability): void {
+  if (!isCapabilityReady(gate, capability)) {
     throw new AiDisabledError(capability);
   }
 }

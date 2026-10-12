@@ -1,6 +1,34 @@
 import { TaskStatus } from './enums';
 import type { Task } from './task';
 
+/** 判断"能不能整批撤销"只需要这三个字段，别逼调用方凑出一个完整 Task */
+export type BreakdownChild = Pick<Task, 'breakdownBatch' | 'createdAt'>;
+
+/**
+ * 能撤销的那一次拆解。
+ *
+ * 一群子任务里可能混着好几个批次（拆过两次、中间还手写了两条），
+ * 撤销的对象必须是**最近那一次** —— 用户说"撤销拆解"，说的是刚做的那一下。
+ *
+ * 只认还带着批次标记的行：手写一条条加进去的步骤没有批次，
+ * 撤销拆解不该顺手把它们删掉。
+ */
+export function undoableBreakdown(
+  children: ReadonlyArray<BreakdownChild>,
+): { batch: string; count: number } | null {
+  let batch: string | null = null;
+  let at = '';
+  for (const child of children) {
+    if (!child.breakdownBatch) continue;
+    if (!batch || child.createdAt > at) {
+      batch = child.breakdownBatch;
+      at = child.createdAt;
+    }
+  }
+  if (!batch) return null;
+  return { batch, count: children.filter((child) => child.breakdownBatch === batch).length };
+}
+
 /**
  * 子任务进度（纯逻辑）。
  *

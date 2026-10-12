@@ -11,6 +11,7 @@ import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { TaskKind, TaskStatus } from '@/domain/enums';
 import { describeRepeat } from '@/domain/repeat-next';
+import { subtaskProgress } from '@/domain/subtask-progress';
 import { isAllDay, taskDue, type Task } from '@/domain/task';
 import { useTheme } from '@/hooks/use-theme';
 import { describeDue, formatDayTime } from '@/utils/datetime';
@@ -36,7 +37,20 @@ export interface TaskRowProps {
    * 待办页本身就是一个"待规划桶"，每条再标「待规划」是冗余，传 false。
    */
   showPendingLabel?: boolean;
+  /**
+   * 就地展开的子任务（待办页用）。
+   *
+   * **只有两步以上才给展开器**：一步不算"拆开了"，为它单开一层折叠
+   * 只是多一个要点的东西 —— 那时候这行就该跟普通任务一个样。
+   */
+  children?: readonly Task[];
+  expanded?: boolean;
+  /** 点小三角。点整行仍然是进详情页，两件事不混 */
+  onToggleExpand?: (task: Task) => void;
 }
+
+/** 展开器出现的门槛：两步以上。见 `children` 上的注释 */
+export const EXPANDABLE_STEPS = 2;
 
 export function TaskRow({
   task,
@@ -45,11 +59,18 @@ export function TaskRow({
   onDelete,
   trailing,
   showPendingLabel = true,
+  children,
+  expanded = false,
+  onToggleExpand,
 }: TaskRowProps) {
   const theme = useTheme();
   const done = task.status === TaskStatus.Done;
   // 行上显示的是"期限"（优先截止），不是"什么时候发生" —— 两者不同，见 taskDue 的注释
   const anchor = taskDue(task);
+
+  const kids = children ?? [];
+  const canExpand = kids.length >= EXPANDABLE_STEPS;
+  const progress = subtaskProgress(kids);
 
   // 「未完成 → 完成」那一刻给勾选圈一个弹出反馈：勾从 0 弹到 1（spring 带轻微过冲），
   // 让"完成了"这件事有正反馈，而不是静默变灰。已完成的行初次渲染不播（prevDone 守住），
@@ -99,12 +120,28 @@ export function TaskRow({
       </Pressable>
 
       <View style={styles.body}>
-        <ThemedText
-          style={done ? styles.doneText : undefined}
-          themeColor={done ? 'textSecondary' : 'text'}
-          numberOfLines={2}>
-          {task.title}
-        </ThemedText>
+        <View style={styles.titleRow}>
+          {canExpand ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityState={{ expanded }}
+              accessibilityLabel={expanded ? '收起子任务' : '展开子任务'}
+              hitSlop={6}
+              onPress={() => onToggleExpand?.(task)}>
+              <Ionicons
+                name={expanded ? 'caret-down' : 'caret-forward'}
+                size={13}
+                color={theme.textSecondary}
+              />
+            </Pressable>
+          ) : null}
+          <ThemedText
+            style={[styles.title, done ? styles.doneText : undefined]}
+            themeColor={done ? 'textSecondary' : 'text'}
+            numberOfLines={2}>
+            {task.title}
+          </ThemedText>
+        </View>
 
         <View style={styles.metaRow}>
           {/*
@@ -144,6 +181,15 @@ export function TaskRow({
       </View>
 
       <View style={styles.right}>
+        {/* 进度只在"真的拆开了"时才出现：一步的话这行就跟普通任务一个样 */}
+        {canExpand ? (
+          <ThemedText
+            type="small"
+            themeColor={progress.allDone ? 'textSecondary' : 'text'}
+            style={styles.progress}>
+            {progress.done}/{progress.total}
+          </ThemedText>
+        ) : null}
         {onDelete ? (
           <Pressable
             accessibilityRole="button"
@@ -158,6 +204,53 @@ export function TaskRow({
         ) : null}
         {trailing}
       </View>
+    </Pressable>
+  );
+}
+
+/**
+ * 展开后的子任务行（待办页就地勾选）。
+ *
+ * ⚠️ 整行 = 勾选，**没有"点进去看详情"** —— 拆出来的就是"下一步做什么"，
+ * 给它一个详情页等于把一步变成一件事。要改内容去父任务那页改。
+ * 勾选走 store 的 `setSubtaskDone`，父任务的完成态跟着子任务自己走。
+ */
+export function SubtaskRow({
+  child,
+  onToggle,
+}: {
+  child: Task;
+  onToggle: (child: Task) => void;
+}) {
+  const theme = useTheme();
+  const done = child.status === TaskStatus.Done;
+  return (
+    <Pressable
+      accessibilityRole="checkbox"
+      accessibilityState={{ checked: done }}
+      accessibilityLabel={done ? '取消完成' : '标记为完成'}
+      onPress={() => onToggle(child)}
+      style={({ pressed }) => [
+        styles.childRow,
+        { backgroundColor: pressed ? theme.backgroundSelected : 'transparent' },
+      ]}>
+      <View
+        style={[
+          styles.childCheck,
+          {
+            borderColor: done ? theme.text : theme.textSecondary,
+            backgroundColor: done ? theme.text : 'transparent',
+          },
+        ]}>
+        {done ? <Ionicons name="checkmark" size={12} color={theme.background} /> : null}
+      </View>
+      <ThemedText
+        type="small"
+        themeColor={done ? 'textSecondary' : 'text'}
+        style={[styles.childTitle, done ? styles.childDone : undefined]}
+        numberOfLines={2}>
+        {child.title}
+      </ThemedText>
     </Pressable>
   );
 }
@@ -195,7 +288,35 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   body: { flex: 1, gap: Spacing.one },
+  titleRow: { flexDirection: 'row', alignItems: 'flex-start', gap: Spacing.one },
+  /** 三角占掉一点宽度之后标题要能自己撑满剩下的，否则长标题会被挤成两行 */
+  title: { flex: 1 },
+  /**
+   * 进度「2/5」：等宽数字会让它更稳（1/5 → 5/5 时不左右跳）。
+   * 用 fontVariant 而不是补空格 —— 补的空格会出现在朗读和无障碍标签里。
+   */
+  progress: { fontSize: 12, lineHeight: 16, fontVariant: ['tabular-nums'] },
   doneText: { textDecorationLine: 'line-through' },
+  /** 子任务行：往里缩一格，视觉上挂在父任务下面 */
+  childRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    marginLeft: Spacing.four,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+    borderRadius: Spacing.two,
+  },
+  childCheck: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  childTitle: { flex: 1 },
+  childDone: { textDecorationLine: 'line-through' },
   metaRow: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two },
   meta: { fontSize: 12, lineHeight: 16 },
   metaMuted: { opacity: 0.6 },

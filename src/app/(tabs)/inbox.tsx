@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 
 import { ChoiceSheet } from '@/components/choice-sheet';
@@ -12,7 +12,7 @@ import {
   type DropZoneRect,
 } from '@/components/reorderable-list';
 import { Screen } from '@/components/screen';
-import { TaskRow } from '@/components/task-row';
+import { SubtaskRow, TaskRow } from '@/components/task-row';
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { dayStripDays, dayStripIndexAt, type StripRect } from '@/domain/day-strip';
@@ -22,6 +22,7 @@ import {
   SEMANTIC_TARGETS,
   type SemanticTarget,
 } from '@/domain/schedule-presets';
+import { TaskStatus } from '@/domain/enums';
 import type { Task } from '@/domain/task';
 import { groupTodos, TODO_DONE_LIMIT, type TodoBucket } from '@/domain/todo';
 import { useTheme } from '@/hooks/use-theme';
@@ -81,9 +82,15 @@ export default function InboxScreen() {
   const reopenTask = useAppStore((state) => state.reopenTask);
   const reorderTasks = useAppStore((state) => state.reorderTasks);
   const scheduleTask = useAppStore((state) => state.scheduleTask);
+  const toggleSubtask = useAppStore((state) => state.setSubtaskDone);
+  const loadSubtasksOfAction = useAppStore((state) => state.loadSubtasksOf);
   const [reordering, setReordering] = useState(false);
   /** 收起来的档。**默认全展开**（对的默认值 = 用户零操作） */
   const [collapsed, setCollapsed] = useState<TodoBucket[]>([]);
+  /** 就地展开了子任务的那几条（父任务 id） */
+  const [expanded, setExpanded] = useState<string[]>([]);
+  /** 父任务 id → 子任务。整批取，不是每行各查一次库 */
+  const [childrenOf, setChildrenOf] = useState<Record<string, Task[]>>({});
   /** 长按原地松手时选中的那一条 —— 非空就弹语义词片 */
   const [arranging, setArranging] = useState<Task | null>(null);
 
@@ -107,6 +114,41 @@ export default function InboxScreen() {
       current.includes(bucket) ? current.filter((b) => b !== bucket) : [...current, bucket],
     );
   }, []);
+
+  const toggleExpanded = useCallback((taskId: string) => {
+    setExpanded((current) =>
+      current.includes(taskId) ? current.filter((id) => id !== taskId) : [...current, taskId],
+    );
+  }, []);
+
+  /*
+   * 子任务跟着 `tasks` 一起取（一次查库，不是每行一次）。
+   *
+   * 勾选一步之后 store 会 refresh（`tasks` 换了新的引用），这里自然重取 ——
+   * 所以"勾掉最后一步、父任务被推成已完成"这种联动不需要额外接线。
+   */
+  useEffect(() => {
+    const ids = tasks.map((task) => task.id);
+    if (!ids.length) {
+      setChildrenOf({});
+      return;
+    }
+    let alive = true;
+    void loadSubtasksOfAction(ids).then((map) => {
+      if (alive) setChildrenOf(map);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [tasks, loadSubtasksOfAction]);
+
+  /** 就地勾选一步：走 store 的 setSubtaskDone，父任务完成态由它负责重算 */
+  const toggleChild = useCallback(
+    (child: Task) => {
+      void toggleSubtask(child.id, child.status !== TaskStatus.Done);
+    },
+    [toggleSubtask],
+  );
 
   // 拖拽开始时重算（依赖 barVisible）：挂着一整天不重启的话，"今天"会停在前一天
   const days = useMemo(() => dayStripDays(), [barVisible]);
@@ -236,17 +278,33 @@ export default function InboxScreen() {
                   onDraggingChange={handleDraggingChange}
                   onReorder={(ids) => void reorderTasks(ids)}
                   onLongPressIdle={setArranging}
-                  renderItem={(task) => (
-                    <TaskRow
-                      task={task}
-                      showPendingLabel={false}
-                      onPress={guarded((t) => router.push(`/task/${t.id}`))}
-                      // 已完成那档的圈是勾上的，再点一下 = 拿回来（不是再完成一次）
-                      onComplete={guarded((t) =>
-                        isDoneGroup ? void reopenTask(t.id) : void completeTask(t.id),
-                      )}
-                    />
-                  )}
+                  renderItem={(task) => {
+                    const kids = childrenOf[task.id] ?? [];
+                    const open = expanded.includes(task.id);
+                    return (
+                      <View>
+                        <TaskRow
+                          task={task}
+                          showPendingLabel={false}
+                          children={kids}
+                          expanded={open}
+                          onToggleExpand={guarded((t) => toggleExpanded(t.id))}
+                          onPress={guarded((t) => router.push(`/task/${t.id}`))}
+                          // 已完成那档的圈是勾上的，再点一下 = 拿回来（不是再完成一次）
+                          onComplete={guarded((t) =>
+                            isDoneGroup ? void reopenTask(t.id) : void completeTask(t.id),
+                          )}
+                        />
+                        {open && kids.length ? (
+                          <View style={styles.children}>
+                            {kids.map((child) => (
+                              <SubtaskRow key={child.id} child={child} onToggle={toggleChild} />
+                            ))}
+                          </View>
+                        ) : null}
+                      </View>
+                    );
+                  }}
                 />
               ) : null}
 
@@ -307,4 +365,6 @@ const styles = StyleSheet.create({
     borderWidth: 2,
   },
   more: { paddingTop: Spacing.one, fontSize: 12 },
+  /** 展开出来的几步：整块跟着父任务那一行，不另起一张卡 */
+  children: { gap: Spacing.one, paddingTop: Spacing.one },
 });
