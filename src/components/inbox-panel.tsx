@@ -82,6 +82,13 @@ export interface InboxPanelProps {
   collapseWhen?: boolean;
   /** 面板里最多列几条（跨两档合计，剩下的走全页） */
   limit?: number;
+  /**
+   * 正在被拖拽的那一行的 id（来自日历页的 `draggingTask`）。
+   * 拖起来的那一刻给源行一个视觉反馈（变淡），让用户知道"拿起来了" ——
+   * 和日历格子里 `pickedUp` 的反馈同一个意思，只是这里用变淡而不是抬起
+   * （面板里的行不能抬，抬了会把下面挤歪）。
+   */
+  draggingId?: string | null;
 }
 
 export function InboxPanel({
@@ -92,6 +99,7 @@ export function InboxPanel({
   onOpenFull,
   collapseWhen = false,
   limit = 6,
+  draggingId = null,
 }: InboxPanelProps) {
   const theme = useTheme();
 
@@ -267,12 +275,16 @@ export function InboxPanel({
                   onComplete={onCompleteTask ? () => onCompleteTask(task) : undefined}
                 />
               );
+              // 拖起来的那一行变淡：源行"拿起来了"的反馈（见 draggingId 注释）
+              const rowStyle = task.id === draggingId ? styles.rowDragging : undefined;
               return gestureFor ? (
                 <GestureDetector key={task.id} gesture={gestureFor(task)}>
-                  <View>{row}</View>
+                  <View style={rowStyle}>{row}</View>
                 </GestureDetector>
               ) : (
-                <View key={task.id}>{row}</View>
+                <View key={task.id} style={rowStyle}>
+                  {row}
+                </View>
               );
             })}
           </View>
@@ -322,4 +334,6 @@ const styles = StyleSheet.create({
   section: { gap: Spacing.one },
   sectionTitle: { paddingHorizontal: Spacing.one },
   moreRow: { alignItems: 'center', paddingVertical: Spacing.two },
+  /** 正在被拖的那一行：变淡，表示"拿起来了"（拖拽源反馈） */
+  rowDragging: { opacity: 0.35 },
 });

@@ -53,3 +53,9 @@ dist-check/
 
 # 临时输出
 tmp-*.txt
+
+# 打好的安装包（apk/JUST-*.apk，一次 50MB+，不该进 git —— 要发就走 Release 附件）
+apk/
+
+# README 的临时备份（README 本身在 git 里，历史就是备份，不需要再存一份）
+README.backup-*.md

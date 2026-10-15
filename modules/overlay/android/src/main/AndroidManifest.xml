@@ -1,26 +1,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-  <!-- 画在别的应用之上 -->
+  <!-- 画在别的应用之上：专注时间浮条用（悬浮球 2026-10-13 已删） -->
   <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
-  <!-- 前台服务：气泡要活着就得挂一条常驻通知，否则退到后台就被系统回收 -->
-  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-
-  <!-- Android 13+ 通知需要用户授权；不给也不影响气泡本身，只是那条常驻通知不显示 -->
+  <!-- Android 13+ 通知需要用户授权；不给也不影响浮条本身，只是通知栏入口不显示 -->
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
   <application>
-    <service
-      android:name="com.aiyuexi.aischedule.overlay.OverlayService"
-      android:enabled="true"
-      android:exported="false"
-      android:foregroundServiceType="specialUse">
-      <property
-        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-        android:value="floating capture bubble" />
-    </service>
-
     <!--
       通知栏入口点开后的透明输入弹窗。
       exported=false：只被本应用的通知 PendingIntent 拉起。
@@ -35,5 +21,32 @@
       android:taskAffinity=""
       android:theme="@android:style/Theme.Translucent.NoTitleBar"
       android:windowSoftInputMode="adjustResize" />
+
+    <!--
+      系统分享入口（2026-10-13）：在微信 / 浏览器 / 相册里点分享就能看见 JUST。
+      exported=true 是必须的 —— 它要被别的 App 唤起，这正是它存在的理由。
+      两个 filter 分开写：text/plain 与 image/* 走的是两条不同的路
+      （文字直接弹窗预填，图片要先存起来再去做 OCR）。
+      label 就是分享菜单里那一行的名字。
+    -->
+    <activity
+      android:name="com.aiyuexi.aischedule.overlay.ShareEntryActivity"
+      android:enabled="true"
+      android:exported="true"
+      android:excludeFromRecents="true"
+      android:taskAffinity=""
+      android:label="记到 JUST"
+      android:theme="@android:style/Theme.Translucent.NoTitleBar">
+      <intent-filter>
+        <action android:name="android.intent.action.SEND" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:mimeType="text/plain" />
+      </intent-filter>
+      <intent-filter>
+        <action android:name="android.intent.action.SEND" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:mimeType="image/*" />
+      </intent-filter>
+    </activity>
   </application>
 </manifest>

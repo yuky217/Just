@@ -10,6 +10,7 @@ import {
   describeNextFire,
   nextFireAt,
   reminderFireTimes,
+  reminderTierOf,
   resolveReminderMinutes,
 } from './reminder';
 import type { Task } from './task';
@@ -340,6 +341,56 @@ describe('resolveReminderMinutes', () => {
  * 于是"每天 8 点吃药"只要哪天没打开 App，第二天就**不会响** ——
  * 而习惯型提醒的全部意义恰恰是"我不打开它也得响"。
  */
+/**
+ * 铃声渠道两档（2026-10-14）：重要 = 考试 / 出发类 / 临近截止；其余普通。
+ * 考试不在这里（CalEvent 走 syncEventReminders 单独打重要渠道）。
+ */
+describe('reminderTierOf', () => {
+  it('普通日程 → 普通渠道', () => {
+    expect(
+      reminderTierOf(timedTask(new Date(2026, 9, 7, 20, 0), { reminderMinutesBefore: 10 }), now),
+    ).toBe('normal');
+  });
+
+  it('出发类（defaultReminderMinutes 判 60）→ 重要', () => {
+    expect(
+      reminderTierOf(
+        timedTask(new Date(2026, 9, 7, 20, 0), {
+          reminderMinutesBefore: 10,
+          title: '19:00 出发去机场',
+        }),
+        now,
+      ),
+    ).toBe('important');
+  });
+
+  it('临近的截止（24h 内）→ 重要', () => {
+    const soon = new Date(now.getTime() + 2 * 3600 * 1000);
+    expect(
+      reminderTierOf(
+        timedTask(soon, {
+          reminderMinutesBefore: 0,
+          time: { attribute: TimeAttribute.Deadline, startAt: null, endAt: null, dueAt: soon.toISOString() },
+        }),
+        now,
+      ),
+    ).toBe('important');
+  });
+
+  it('遥远的截止（>24h）→ 普通（远未来的截止不该现在就响得急）', () => {
+    const far = new Date(now.getTime() + 10 * 24 * 3600 * 1000);
+    expect(
+      reminderTierOf(
+        timedTask(far, {
+          reminderMinutesBefore: 0,
+          time: { attribute: TimeAttribute.Deadline, startAt: null, endAt: null, dueAt: far.toISOString() },
+        }),
+        now,
+      ),
+    ).toBe('normal');
+  });
+});
+
 describe('reminderFireTimes', () => {
   /** 周三中午。用显式的 now 而不是系统时间，星期几才是确定的 */
   const now = new Date(2026, 9, 7, 12, 0);

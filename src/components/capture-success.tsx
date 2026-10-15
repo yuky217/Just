@@ -1,10 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
-import * as Haptics from 'expo-haptics';
 import { useEffect, useRef } from 'react';
 import { Animated, Platform, Pressable, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
+import { useHaptics } from '@/hooks/use-haptics';
 import { useTheme } from '@/hooks/use-theme';
 
 /**
@@ -36,13 +36,14 @@ export function CaptureSuccess({
   onDone: () => void;
 }) {
   const theme = useTheme();
+  const fireHaptic = useHaptics();
   const scale = useRef(new Animated.Value(0.3)).current;
   const fade = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    if (Platform.OS !== 'web') {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-    }
+    // 记完的轻触觉：统一走 useHaptics('success')，受「触觉反馈」开关管
+    // （开关关了就不响；web 上 hook 内部直接跳过）。动效与触觉都是自退场的成功反馈。
+    fireHaptic('success');
     Animated.parallel([
       // 比原先硬一点（friction 5→7、tension 160→220）：勾要更快跳到位，
       // 否则动效还没站稳页面就关了，看着像没播完

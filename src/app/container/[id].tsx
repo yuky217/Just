@@ -60,6 +60,12 @@ export default function ContainerDetailScreen() {
   const [addingChild, setAddingChild] = useState(false);
   const [childTitle, setChildTitle] = useState('');
   const [pickingTasks, setPickingTasks] = useState(false);
+  /**
+   * 「加任务」输入行默认收起（2026-10-13）：它此前常年占着任务卡顶部一整行，
+   * 而多数时候人只是来看进度的。收成卡头一枚「＋」，点开才出现 ——
+   * 打开后依旧建完不收场（连续录好几条时慢的不是操作次数，是要不要重新点输入框）。
+   */
+  const [addingTask, setAddingTask] = useState(false);
   /** 「新建任务」的内联输入：一个项目往往要连着录好几条，所以建完不收输入框 */
   const [newTaskTitle, setNewTaskTitle] = useState('');
   /** 任务输入框：提交一条后要把焦点还回去，好接着写下一条（连续创建） */
@@ -264,54 +270,65 @@ export default function ContainerDetailScreen() {
         title="任务"
         hint={members.length ? `${members.length} 件` : '一行一条，可以一次写好几条'}
         right={
-          candidates.length ? (
+          <View style={styles.cardActions}>
+            {candidates.length ? (
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => setPickingTasks((value) => !value)}>
+                <ThemedText type="small" themeColor="textSecondary">
+                  {pickingTasks ? '收起' : '加入已有'}
+                </ThemedText>
+              </Pressable>
+            ) : null}
             <Pressable
               accessibilityRole="button"
-              onPress={() => setPickingTasks((value) => !value)}>
-              <ThemedText type="small" themeColor="textSecondary">
-                {pickingTasks ? '收起' : '加入已有'}
-              </ThemedText>
+              accessibilityLabel="加一个任务"
+              hitSlop={8}
+              onPress={() => setAddingTask((value) => !value)}>
+              <Ionicons name={addingTask ? 'close' : 'add'} size={20} color={theme.text} />
             </Pressable>
-          ) : null
+          </View>
         }>
         {/*
-          输入框**常驻**，不再藏在「＋ 新建」后面：走到这一步的人已经决定要加任务了，
-          再让他点一次只是多一次操作。
-          **一次一条，但建完不清场**：清空 + 焦点还在，接着写下一条 ——
-          往项目里丢任务连着想出来的时候，慢的不是操作次数，是"要不要重新点一下输入框"。
+          输入行**默认收起**（2026-10-13，见 addingTask 的注释）：点卡头那枚「＋」才展开。
+          展开后「建完不清场、焦点还在」照旧 —— 往项目里丢任务连着想出来的时候，
+          慢的不是操作次数，是"要不要重新点一下输入框"。
           软键盘的「完成」键直接等于"建一条"（单行 + blurOnSubmit=false）。
         */}
-        <View style={styles.addRow}>
-          <TextInput
-            ref={taskInputRef}
-            value={newTaskTitle}
-            onChangeText={setNewTaskTitle}
-            placeholder="加一个任务"
-            placeholderTextColor={theme.textSecondary}
-            returnKeyType="done"
-            onSubmitEditing={() => void createTasksNow()}
-            blurOnSubmit={false}
-            style={[
-              styles.inlineInput,
-              {
-                color: theme.text,
-                backgroundColor: theme.background,
-                borderColor: theme.backgroundSelected,
-              },
-            ]}
-          />
-          {canAddTasks ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="加上这个任务"
-              onPress={() => void createTasksNow()}
-              style={[styles.smallAction, { backgroundColor: theme.text }]}>
-              <ThemedText type="small" style={{ color: theme.background }}>
-                加上
-              </ThemedText>
-            </Pressable>
-          ) : null}
-        </View>
+        {addingTask ? (
+          <View style={styles.addRow}>
+            <TextInput
+              ref={taskInputRef}
+              value={newTaskTitle}
+              onChangeText={setNewTaskTitle}
+              placeholder="加一个任务"
+              placeholderTextColor={theme.textSecondary}
+              autoFocus
+              returnKeyType="done"
+              onSubmitEditing={() => void createTasksNow()}
+              blurOnSubmit={false}
+              style={[
+                styles.inlineInput,
+                {
+                  color: theme.text,
+                  backgroundColor: theme.background,
+                  borderColor: theme.backgroundSelected,
+                },
+              ]}
+            />
+            {canAddTasks ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="加上这个任务"
+                onPress={() => void createTasksNow()}
+                style={[styles.smallAction, { backgroundColor: theme.text }]}>
+                <ThemedText type="small" style={{ color: theme.background }}>
+                  加上
+                </ThemedText>
+              </Pressable>
+            ) : null}
+          </View>
+        ) : null}
 
         {members.length ? (
           members.map((task) => (
@@ -323,9 +340,9 @@ export default function ContainerDetailScreen() {
               onDelete={(t) => void updateTask(t.id, { containerId: null })}
             />
           ))
-        ) : (
+        ) : addingTask ? null : (
           <ThemedText type="small" themeColor="textSecondary">
-            还没有任务。用右上角「＋ 新建」加一条。
+            还没有任务。点这卡右上角的「＋」加一条。
           </ThemedText>
         )}
 
@@ -600,6 +617,8 @@ function Chip({
 }
 
 const styles = StyleSheet.create({
+  /** 任务卡卡头右侧：「加入已有」（词）+ 「＋」（加任务）并排 */
+  cardActions: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three },
   titleInput: { fontSize: 22, lineHeight: 30, fontWeight: '600', padding: 0 },
   noteInput: {
     minHeight: 64,

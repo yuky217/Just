@@ -8,9 +8,11 @@ import { eventRepository } from '@/data/repositories/event-repository';
 import { focusRepository } from '@/data/repositories/focus-repository';
 import { ideaRepository } from '@/data/repositories/idea-repository';
 import { markRepository } from '@/data/repositories/mark-repository';
+import { periodRepository } from '@/data/repositories/period-repository';
 import { taskRepository } from '@/data/repositories/task-repository';
 import { termRepository } from '@/data/repositories/term-repository';
 import { quickCapture, type QuickCaptureInput, type QuickCaptureResult } from '@/entry/quick-capture';
+import { useSettings } from '@/state/settings-store';
 import {
   cancelAllReminders,
   cancelTaskReminders,
@@ -18,6 +20,7 @@ import {
   syncCourseReminders,
   syncEventReminders,
   syncRepeatingTaskReminders,
+  syncPeriodReminders,
 } from '@/entry/notifications';
 import type { Checkin } from '@/domain/checkins';
 import type { Container, Mark } from '@/domain/container';
@@ -50,11 +53,13 @@ import {
   occurrencesInPeriod,
 } from '@/domain/habit-period';
 import type { Idea } from '@/domain/idea';
+import { predictPeriod, type PeriodLog } from '@/domain/period';
 import { planIdeaTask } from '@/domain/idea-to-task';
-import type { IdeaDeleteUndo, TaskDeleteUndo } from '@/domain/bulk-delete';
+import type { IdeaDeleteUndo, TaskDeleteUndo, TaskNestUndo } from '@/domain/bulk-delete';
 import { advanceRepeatingTask } from '@/domain/repeat-next';
 import { buildSpanTime } from '@/domain/schedule-presets';
 import { desiredParentStatus } from '@/domain/subtask-progress';
+import { planNest } from '@/domain/nest';
 import { CaptureSource, CompletionRule, TaskKind, TaskStatus } from '@/domain/enums';
 import type { Task, TaskTime } from '@/domain/task';
 import { toDayKey } from '@/utils/datetime';
@@ -121,6 +126,8 @@ interface AppState {
   ideas: Idea[];
   /** 全部打卡记录（习惯页与任务详情页共用；量级很小，一次读全） */
   checkins: Checkin[];
+  /** 经期记录（首页预测卡与日历圆点共用；量级很小，一次读全） */
+  periodLogs: PeriodLog[];
   /** 习惯型任务（kind = habit 的顶层任务） */
   habits: Task[];
   /** 小东西的累计生长秒数（只涨不落） */
@@ -204,6 +211,19 @@ interface AppState {
   convertIdeaToTask: (ideaId: string) => Promise<string | null>;
 
   /**
+   * 记一次经期来潮：startDayKey 是来潮当天（yyyy-MM-dd），length 是持续天数。
+   * 同一天重复点不重复插（仓储按日去重）；落库后整库刷新，并重排经期提醒。
+   */
+  logPeriod: (startDayKey: string, length: number) => Promise<void>;
+  /** 删一条经期记录（软删，数据不物理丢失） */
+  removePeriodLog: (id: string) => Promise<void>;
+  /**
+   * 按当前经期记录与设置重排"提前提醒"——功能关 / 没数据就只撤不排。
+   * 抽出成独立方法：记录变动、设置变动（周期长度 / 提前天数 / 开关）都能触发它。
+   */
+  syncPeriodReminders: () => void;
+
+  /**
    * 在某个容器下**直接新建**一条任务（容器页的「新建」）。
    * 刻意不给时间：没时间就是"待规划"（待办的定义），想排期再去任务详情页或日历拖。
    */
@@ -262,6 +282,19 @@ interface AppState {
 
   /** 手动排序：按新的 id 顺序写库 */
   reorderTasks: (ids: readonly string[]) => Promise<void>;
+
+  /**
+   * 拖拽变子任务：把一条任务挂到另一条下面。
+   *
+   * 只挂一层（2026-10-15 决定）：被拖的那条**原本挂在自己下面的子任务**
+   * 退回顶层，避免三层嵌套。父任务必须是顶层（parentId 为空），否则拒绝——
+   * 这条 app 的子任务只有一层，挂到别人的子任务下面会破坏这个前提。
+   *
+   * 挂完重算两个父任务的完成态（新父 + 旧父），并刷新。返回撤销凭据。
+   */
+  makeSubtask: (taskId: string, parentId: string) => Promise<TaskNestUndo | null>;
+  /** 撤销一次「拖拽变子任务」：恢复原父级、把退回顶层的子任务挂回去 */
+  undoNest: (undo: TaskNestUndo) => Promise<void>;
 
   /**
    * 甘特图拖拽改期：把一条任务的时间整体平移 N 天（保留原来的时分）。
@@ -385,6 +418,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   marks: [],
   ideas: [],
   checkins: [],
+  periodLogs: [],
   habits: [],
   growthSeconds: 0,
   lastCapture: null,
@@ -409,6 +443,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       // 后面那几天的通知压根没排过 —— 那条提醒会**凭空消失**且无从察觉。
       // 冷启动补满窗口，把"我不打开它也得响"这件事兜住。同样不请求权限、不 await。
       void syncRepeatingTaskReminders(get().tasks);
+      // 经期提前提醒：有记录就排，功能关/没记录就不排。同样不请求权限、不 await。
+      void get().syncPeriodReminders();
     } catch (err) {
       set({
         initializing: false,
@@ -430,6 +466,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       marks,
       ideas,
       checkins,
+      periodLogs,
       habits,
       growthSeconds,
       courses,
@@ -442,6 +479,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       markRepository.listAll(),
       ideaRepository.listActive(),
       checkinRepository.listAll(),
+      periodRepository.listAll(),
       taskRepository.listHabits(),
       focusRepository.totalGrowthSeconds(),
       courseRepository.listAll(),
@@ -455,6 +493,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       marks,
       ideas,
       checkins,
+      periodLogs,
       habits,
       growthSeconds,
       courses,
@@ -474,7 +513,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   loadContainer: async (id) => containerRepository.getById(id),
 
   capture: async (input) => {
-    const result = await quickCapture(input);
+    /*
+     * 功能开关在这里注入，而不是让每个调用点（记录页 / 首页 / 想法页 / 日历）各传一遍 ——
+     * 那是五个地方都有可能漏掉一个。
+     *
+     * 分流必须看它：想法库关了还把"我有个想法"判成想法，这条就落进一个
+     * 用户看不见的格子（记完找不到，比记错了更伤人）。关掉的功能
+     * **不许被自动分流送进去**。
+     */
+    const result = await quickCapture({
+      ...input,
+      features: useSettings.getState().features,
+    });
     set({ lastCapture: result });
     await get().refresh();
     return result;
@@ -675,6 +725,37 @@ export const useAppStore = create<AppState>((set, get) => ({
     return task.id;
   },
 
+  logPeriod: async (startDayKey, length) => {
+    const [y, m, d] = startDayKey.split('-').map(Number);
+    const start = new Date(y, (m ?? 1) - 1, d ?? 1);
+    // 同一天重复点不重复插：按记录的来潮日去重（不是按"今天"）
+    const existing = await periodRepository.getByDay(start);
+    if (!existing) await periodRepository.log(start, length);
+    await get().refresh();
+    get().syncPeriodReminders();
+  },
+
+  removePeriodLog: async (id) => {
+    await periodRepository.softDelete(id);
+    await get().refresh();
+    get().syncPeriodReminders();
+  },
+
+  syncPeriodReminders: () => {
+    const { periodLogs } = get();
+    const s = useSettings.getState();
+    const enabled = s.features.period ?? true;
+    const forecast = predictPeriod(periodLogs, {
+      cycleLength: s.periodCycleLength,
+      periodLength: s.periodLength,
+    });
+    void syncPeriodReminders({
+      enabled,
+      nextStart: forecast.nextStart ?? null,
+      reminderDays: s.periodReminderDays,
+    });
+  },
+
   addTaskToContainer: async (containerId, title) => {
     const task = createTask({
       title,
@@ -791,6 +872,41 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   reorderTasks: async (ids) => {
     await taskRepository.reorder(ids);
+    await get().refresh();
+  },
+
+  makeSubtask: async (taskId, parentId) => {
+    const task = await taskRepository.getById(taskId);
+    if (!task) return null;
+    const parent = await taskRepository.getById(parentId);
+    if (!parent) return null;
+
+    // 只一层：不能挂自己、不能挂到别人的子任务下面（规则见 domain/nest.planNest）
+    const childChildren = task.parentId !== null ? await taskRepository.listSubtasks(taskId) : [];
+    const plan = planNest(task, parent, childChildren);
+    if (!plan) return null;
+
+    const prevParentId = task.parentId ?? null;
+    // 被拖的那条原本挂在自己下面的子任务：先退回顶层（先一层原则）
+    if (plan.reparentIds.length) {
+      await taskRepository.detachSubtasks(taskId);
+    }
+    await taskRepository.update(taskId, { parentId: plan.parentId });
+
+    // 新旧两个父任务的完成态都要重算（全完成才完成，被取消一个就打回待办）
+    await get().syncParentStatus(parentId);
+    if (prevParentId) await get().syncParentStatus(prevParentId);
+    await get().refresh();
+    return { kind: 'nest', taskId, prevParentId, reparentedSubtaskIds: plan.reparentIds };
+  },
+
+  undoNest: async (undo) => {
+    await taskRepository.update(undo.taskId, { parentId: undo.prevParentId });
+    for (const sid of undo.reparentedSubtaskIds) {
+      await taskRepository.update(sid, { parentId: undo.taskId });
+    }
+    await get().syncParentStatus(undo.taskId);
+    if (undo.prevParentId) await get().syncParentStatus(undo.prevParentId);
     await get().refresh();
   },
 
@@ -1203,3 +1319,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     await get().refresh();
   },
 }));
+
+/**
+ * 设置里的经期相关改动（开关 / 周期长度 / 经期长度 / 提前天数）要立刻反映到提醒上。
+ *
+ * 这些键在 settings-store，而提醒重排在 app-store，跨 store 不能在 setFeature 里顺手做。
+ * 这里订阅一次：只有这几项真正变了才重排，避免每次设置变动都去碰通知。
+ * 记经期 / 删记录走 store 自己的 logPeriod / removePeriodLog，已经各自重排过了。
+ */
+useSettings.subscribe((state, prev) => {
+  if (
+    state.features.period !== prev.features.period ||
+    state.periodCycleLength !== prev.periodCycleLength ||
+    state.periodLength !== prev.periodLength ||
+    state.periodReminderDays !== prev.periodReminderDays
+  ) {
+    useAppStore.getState().syncPeriodReminders();
+  }
+});

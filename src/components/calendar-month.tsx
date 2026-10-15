@@ -29,6 +29,9 @@ import { useTheme } from '@/hooks/use-theme';
 const WEEKDAY_LABELS = ['一', '二', '三', '四', '五', '六', '日'] as const;
 const WEEK_ROWS = MONTH_GRID_ROWS;
 
+/** 经期圆点的专属红：在浅纸与深色两种底上都能跳出来，不依赖主题语义色 */
+const PERIOD_RED = '#D6455B';
+
 /**
  * 一格上到底有哪几种东西、谁该给谁让位、深浅怎么分 —— 全在
  * `domain/calendar-shape.dayShapes` 里定死，这个组件只负责画。
@@ -46,6 +49,11 @@ export interface CalendarMonthProps {
    * 不传就退回"全是实心点"的老行为 —— 月历本身不该被这两个数绑架。
    */
   marksByDay?: Map<string, DayMarks>;
+  /**
+   * 经期覆盖的日子：key = yyyy-MM-dd，value = 'period'（经期）。
+   * 由日历页在 features.period 开着时算好传进来；关掉功能这一项就不传，圆点整块消失。
+   */
+  periodByDay?: Map<string, 'period'>;
   /** 把日期格注册给拖拽层（命中检测用） */
   registerCell?: (key: string) => (view: View | null) => void;
   /** 当前拖拽悬停的日期格 key，该格高亮 */
@@ -60,6 +68,7 @@ export function CalendarMonth({
   onSelectDay,
   countsByDay,
   marksByDay,
+  periodByDay,
   registerCell,
   dropTargetKey,
 }: CalendarMonthProps) {
@@ -144,7 +153,7 @@ export function CalendarMonth({
                         : theme.textSecondary;
                     return (
                       <View
-                        key={i}
+                        key={`s-${i}`}
                         style={[
                           styles.dot,
                           // 课：空心（背景，不用你动手）· 考试：方块（硬边界）· 任务：实心点
@@ -158,6 +167,23 @@ export function CalendarMonth({
                       />
                     );
                   })}
+                  {(() => {
+                    // 经期：和上面的"事件点"并排，但用专属配色，
+                    // 不参与 dayShapes 的配额（那套只管课/考试/任务）。
+                    const pk = periodByDay?.get(key);
+                    if (!pk) return null;
+                    const tint = selectedDay ? theme.background : PERIOD_RED;
+                    return (
+                      <View
+                        key="period"
+                        style={[
+                          styles.dot,
+                          { backgroundColor: tint, borderRadius: 999 },
+                          { opacity: outside ? 0.4 : 1 },
+                        ]}
+                      />
+                    );
+                  })()}
                 </View>
               </Pressable>
             );

@@ -1,20 +1,24 @@
 import { describe, expect, it } from 'vitest';
 
-import { createCourse, createEvent, createMark, createTask, createTerm } from './factory';
+import { createEvent, createMark, createTask } from './factory';
 import { TimeAttribute } from './enums';
 import { describeMark } from './marks';
 import { MONTH_PLAN_TASK_LIMIT, buildMonthPlan, type MonthPlanInput } from './month-plan';
 import type { Task } from './task';
 
 /**
- * 月历下拉清单的四条规矩：
+ * 月历下拉清单的三条规矩：
  *
  * 1. **只列"属于这个月"的日子** —— 月历画的是 6×7 整张网格（首尾带着
  *    上/下月的几天），清单要是照抄整张网格，9 月 29 号就会同时出现在
  *    9 月和 10 月两张清单里。
  * 2. **空的日子不出现** —— 31 行里 20 行是空的，节奏就看不见了。
  * 3. **每天最多 MONTH_PLAN_TASK_LIMIT 件事**，超出部分报数，留出"看这天"的出口。
- * 4. **课表关掉时课连清单一起消失**（与月历圆点、日视图背景带同一口径）。
+ *
+ * ⚠️ **课不在这张清单里**（2026-10-13 用户点名"课程不要写进安排里"）：
+ * 课是学期的背景，每天都能列出的东西列出来等于没信息。所以 `MonthPlanInput`
+ * 里**根本没有课的入口** —— 这条规矩是类型层面保证的，不需要（也没法）在这里
+ * 用一个用例去断言"传了课也没出现"。
  *
  * 验牙：
  * - 去掉 `isSameMonth` 过滤 → 第 1 条红；
@@ -31,22 +35,12 @@ const base: MonthPlanInput = {
   tasksByDay: new Map(),
   examsByDay: new Map(),
   marksByDay: new Map(),
-  courses: [],
-  term: null,
-  timetableOn: false,
 };
 
 const plan = (over: Partial<MonthPlanInput>) => buildMonthPlan({ ...base, ...over });
 
 const dates = (days: ReturnType<typeof buildMonthPlan>): number[] =>
   days.map((day) => day.date.getDate());
-
-/** 第 1 周从 2026-09-07（周一）起，所以 10 月 5 号是第 5 周的周一 */
-const term = createTerm({ label: '2026秋', startDayKey: '2026-09-07' });
-const mathCourse = createCourse({
-  title: '高等数学',
-  sessions: [{ weekday: 1, startPeriod: 1, endPeriod: 2, weeks: [5] }],
-});
 
 describe('buildMonthPlan', () => {
   it('只列属于这个月的日子（网格里带上/下月的那几格不算）', () => {
@@ -99,7 +93,7 @@ describe('buildMonthPlan', () => {
     expect(days[0].extraTasks).toBe(0);
   });
 
-  it('课、考试、纪念日在同一天上各归各位', () => {
+  it('考试、纪念日、任务在同一天上各归各位', () => {
     const days = plan({
       tasksByDay: new Map([['2026-10-08', [task('交作业', '2026-10-08T09:00:00')]]]),
       examsByDay: new Map([
@@ -108,15 +102,6 @@ describe('buildMonthPlan', () => {
       marksByDay: new Map([
         ['2026-10-08', [describeMark(createMark({ title: '在一起', date: '2026-10-08' }))]],
       ]),
-      // 10 月 8 号是周四（第 5 周），让课也落在这一天，才谈得上"各归各位"
-      courses: [
-        createCourse({
-          title: '高等数学',
-          sessions: [{ weekday: 4, startPeriod: 1, endPeriod: 2, weeks: [5] }],
-        }),
-      ],
-      term,
-      timetableOn: true,
     });
     expect(dates(days)).toEqual([8]);
     expect(days[0].tasks.map((t) => t.title)).toEqual(['交作业']);
@@ -124,30 +109,14 @@ describe('buildMonthPlan', () => {
     expect(days[0].marks.map((m) => m.mark.title)).toEqual(['在一起']);
   });
 
-  it('只有课的那天也算有安排（"这天空心点是哪几门课"正是想问的）', () => {
-    const days = plan({ courses: [mathCourse], term, timetableOn: true });
-    expect(dates(days)).toEqual([5]);
-    expect(days[0].courses.map((slot) => slot.course.title)).toEqual(['高等数学']);
-    expect(days[0].tasks).toEqual([]);
-  });
-
-  it('课表关掉（或没有学期）时，课连清单一起消失', () => {
-    expect(plan({ courses: [mathCourse], term, timetableOn: false })).toEqual([]);
-    expect(plan({ courses: [mathCourse], term: null, timetableOn: true })).toEqual([]);
-  });
-
-  it('学期没排课的星期不算（第 5 周有课、第 6 周没有）', () => {
+  it('只有考试的哪天也出现（课不算，考试算）', () => {
     const days = plan({
-      courses: [
-        createCourse({
-          title: '只在第5周',
-          sessions: [{ weekday: 1, startPeriod: 1, endPeriod: 2, weeks: [5] }],
-        }),
-      ],
-      term,
-      timetableOn: true,
+      examsByDay: new Map([
+        ['2026-10-15', [createEvent({ title: '高数期末', startAt: '2026-10-15T09:00:00' })]],
+      ]),
     });
-    // 10 月有 5 个周一：5、12、19、26 只有第 5 周（10/5）那一次
-    expect(dates(days)).toEqual([5]);
+    expect(dates(days)).toEqual([15]);
+    expect(days[0].tasks).toEqual([]);
+    expect(days[0].marks).toEqual([]);
   });
 });

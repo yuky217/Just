@@ -1,8 +1,16 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Modal, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Modal,
+  Pressable,
+  StyleSheet,
+  TextInput,
+  View,
+} from 'react-native';
 
-import { understandText } from '@/capabilities/client';
+import { isCapabilityReady, understandText } from '@/capabilities/client';
+import { AiCapability } from '@/capabilities/types';
 import { ChoiceSheet, type ChoiceOption } from '@/components/choice-sheet';
 import {
   DateTimeSheet,
@@ -13,6 +21,7 @@ import {
   type DateTimeDraft,
   type DateTimePreset,
 } from '@/components/date-time-picker';
+import { describeSpeechError, isSpeechAvailable, recognizeSpeech } from '@/entry/speech';
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { CONTAINER_KIND_LABEL } from '@/domain/container-stats';
@@ -63,6 +72,8 @@ export interface CaptureOptions {
    * 都汇进 `quickCapture` 的同一套规则里，所以不会出现"AI 一套口径、本地一套"。
    */
   parsed?: ParsedSchedule | null;
+  /** 这次的内容里有没有一段是语音说的（落库时记 source = voice） */
+  voiceUsed?: boolean;
 }
 
 export interface CaptureInputProps {
@@ -88,6 +99,8 @@ export interface CaptureInputProps {
    * 再让他按一遍「记下」等于把同一个动作问两次。
    */
   autoSubmit?: boolean;
+  /** 语音输入出问题时的一句话往哪送（调用方有地方显示；不传就安静失败） */
+  onVoiceError?: (message: string) => void;
   onSubmit: (text: string, options: CaptureOptions) => void | Promise<void>;
 }
 
@@ -102,6 +115,7 @@ export function CaptureInput({
   timePresets,
   initialText,
   autoSubmit = false,
+  onVoiceError,
   onSubmit,
 }: CaptureInputProps) {
   const theme = useTheme();
@@ -111,13 +125,44 @@ export function CaptureInput({
    * 只剩一句"不归入"。一个 prop 没人传却看着像在生效，比没有更坏）。
    */
   const containers = useAppStore((state) => state.containers);
+  /**
+   * 功能开关：**项目**和**想法库**这两个快捷入口跟着开关消失。
+   *
+   * 与别处不同，这里订阅（而不是 `getState()`）：用户刚在设置里拨完开关回来，
+   * 这一条必须**立刻**变了样 —— "改动立即生效"是这次的要求，
+   * 而输入条重渲染一次的代价远小于"关了还看得见"。
+   */
+  const features = useSettings((state) => state.features);
+  const projectsOn = features.projects ?? true;
+  const ideasOn = features.ideas ?? true;
   const [text, setText] = useState(initialText ?? '');
   /** 用户在记录页自己勾的「这是灵感」；想法页不用它（那边 ideaOnly 恒真） */
   const [ideaToggled, setIdeaToggled] = useState(false);
   const [busy, setBusy] = useState(false);
+  /** 轻提示（如「AI 没读懂，已按原话保存」）：非阻塞、自退场，不挡记录流 */
+  const [notice, setNotice] = useState<string | null>(null);
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dismissNotice = useCallback(() => {
+    if (noticeTimer.current) {
+      clearTimeout(noticeTimer.current);
+      noticeTimer.current = null;
+    }
+    setNotice(null);
+  }, []);
+  /** 语音识别界面开着的这段时间（按钮转圈，别让用户连点开两个） */
+  const [listening, setListening] = useState(false);
+  /** 这台设备有没有系统语音识别。没有 → 麦克风按钮根本不出现 */
+  const speechAvailable = useMemo(() => isSpeechAvailable(), []);
+  /** 这一段里有没有内容是语音说的：提交时带进 options，落库记 source = voice */
+  const voiceUsedRef = useRef(false);
 
-  /** 想法态：整条就是为灵感生的，或者用户当场勾了 */
-  const asIdea = ideaOnly || ideaToggled;
+  /**
+   * 想法态：整条就是为灵感生的，或者用户当场勾了。
+   *
+   * 想法库关掉时那个勾**不会出现**，所以这里也不认它 ——
+   * 万一有旧状态残留（或深链带进来），也不能让这条记录悄悄落进一个看不见的库。
+   */
+  const asIdea = ideaOnly || (ideasOn && ideaToggled);
 
   /* 快捷设置的草稿：都留到提交那一刻才写库 */
   const [sheet, setSheet] = useState<Sheet>(null);
@@ -199,6 +244,14 @@ export function CaptureInput({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 卸载时清掉轻提示的计时器，避免回调一个已卸载的组件
+  useEffect(
+    () => () => {
+      if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    },
+    [],
+  );
+
   const reset = () => {
     setText('');
     setIdeaToggled(false);
@@ -207,10 +260,36 @@ export function CaptureInput({
     setRepeat(null);
     setReminder(undefined);
     setDraft(defaultDraft());
+    voiceUsedRef.current = false;
+  };
+
+  /**
+   * 语音输入（2026-10-13）：弹系统识别界面，把说的话**追加**到输入框里 ——
+   * 用户可能已经打了一半，覆盖他就白打了。识别失败/取消都不打断记录流程：
+   * 错误只是一句话（有地方显示就显示，没有就安静），字还在输入框里。
+   */
+  const onVoice = async () => {
+    if (listening) return;
+    setListening(true);
+    try {
+      const spoken = (await recognizeSpeech('说话就行')).trim();
+      if (!spoken) return;
+      voiceUsedRef.current = true;
+      setText((prev) => {
+        const current = prev.trim();
+        return current ? `${current} ${spoken}` : spoken;
+      });
+    } catch (err) {
+      const message = describeSpeechError(err);
+      if (message) onVoiceError?.(message);
+    } finally {
+      setListening(false);
+    }
   };
 
   const submit = async () => {
     if (!canSubmit) return;
+    dismissNotice();
     setBusy(true);
     try {
       /*
@@ -223,19 +302,34 @@ export function CaptureInput({
        * 读的是 `getState()` 而不是订阅 —— 提交是一次性动作，
        * 没必要为它让整条输入条跟着设置重渲染（想法页/记录页都用着它）。
        */
+      const gate = selectCapabilityGate(useSettings.getState());
+      const understoodReady = !asIdea && isCapabilityReady(gate, AiCapability.Understand);
       const recognized = asIdea
         ? null
-        : await understandText(selectCapabilityGate(useSettings.getState()), text.trim());
+        : await understandText(gate, text.trim());
 
       await onSubmit(text.trim(), {
         asIdea,
         time,
-        containerId,
+        // 项目关了就不挂容器：挂上一个用户看不见的项目，等于把这条记录藏起来
+        containerId: projectsOn ? containerId : null,
         repeat,
         reminderMinutesBefore: reminder,
         parsed: recognized,
+        voiceUsed: voiceUsedRef.current,
       });
       reset();
+      /*
+       * 能力开着却没读懂（网络/格式/答得不成形都落在这）：**不打断记录**，
+       * 已经按原话存好了。只给一句自退场的轻提示，让用户知道"AI 今天没帮忙"，
+       * 而不是要么静默（用户以为 AI 读懂了）、要么弹重试（把记录变成两道工序）。
+       * 能力没开（understoodReady=false）时不提示 —— 那本来就是本地模式，不意外。
+       */
+      if (understoodReady && !recognized) {
+        setNotice('AI 没读懂，已按原话保存');
+        if (noticeTimer.current) clearTimeout(noticeTimer.current);
+        noticeTimer.current = setTimeout(dismissNotice, 2500);
+      }
     } finally {
       setBusy(false);
     }
@@ -305,13 +399,16 @@ export function CaptureInput({
         }}
         onClear={time ? () => setTime(null) : undefined}
       />
-      <QuickButton
-        icon="folder-outline"
-        label={currentContainer ? currentContainer.title : '项目'}
-        active={Boolean(currentContainer)}
-        onPress={() => setSheet('list')}
-        onClear={currentContainer ? () => setContainerId(null) : undefined}
-      />
+      {/* 项目关了：这一格不出现（它的列表页也一起没了，留着就是个死链） */}
+      {projectsOn ? (
+        <QuickButton
+          icon="folder-outline"
+          label={currentContainer ? currentContainer.title : '项目'}
+          active={Boolean(currentContainer)}
+          onPress={() => setSheet('list')}
+          onClear={currentContainer ? () => setContainerId(null) : undefined}
+        />
+      ) : null}
       <QuickButton
         icon="repeat-outline"
         label={repeat ? describeRepeat(repeat) : '重复'}
@@ -347,6 +444,30 @@ export function CaptureInput({
           multiline
           style={[styles.input, { color: theme.text }]}
         />
+        {/*
+          语音输入：夹在输入框和「记下」之间。设备上没有识别组件时整颗不出现 ——
+          摆一颗必然失败的按钮，比没有更坏。
+        */}
+        {speechAvailable ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="语音输入"
+            disabled={listening || busy}
+            onPress={onVoice}
+            style={({ pressed }) => [
+              styles.voice,
+              {
+                borderColor: theme.backgroundSelected,
+                opacity: pressed ? 0.7 : 1,
+              },
+            ]}>
+            {listening ? (
+              <Ionicons name="ellipsis-horizontal" size={18} color={theme.textSecondary} />
+            ) : (
+              <Ionicons name="mic-outline" size={18} color={theme.text} />
+            )}
+          </Pressable>
+        ) : null}
         <Pressable
           onPress={submit}
           disabled={!canSubmit}
@@ -354,14 +475,21 @@ export function CaptureInput({
             styles.submit,
             {
               backgroundColor: canSubmit ? theme.text : theme.backgroundSelected,
-              opacity: pressed ? 0.8 : 1,
+              opacity: busy || pressed ? 0.8 : 1,
             },
           ]}>
-          <ThemedText
-            type="smallBold"
-            style={{ color: canSubmit ? theme.background : theme.textSecondary }}>
-            {submitLabel}
-          </ThemedText>
+          {busy ? (
+            <ActivityIndicator
+              size="small"
+              color={canSubmit ? theme.background : theme.textSecondary}
+            />
+          ) : (
+            <ThemedText
+              type="smallBold"
+              style={{ color: canSubmit ? theme.background : theme.textSecondary }}>
+              {submitLabel}
+            </ThemedText>
+          )}
         </Pressable>
       </View>
 
@@ -373,7 +501,8 @@ export function CaptureInput({
       */}
       {quickRow}
 
-      {showIdeaToggle && !ideaOnly ? (
+      {/* 想法库关了：这个勾不出现 —— 勾了也不知道东西去了哪儿 */}
+      {showIdeaToggle && !ideaOnly && ideasOn ? (
         <Pressable style={styles.toggleRow} onPress={() => setIdeaToggled((v) => !v)}>
           <View
             style={[
@@ -389,6 +518,18 @@ export function CaptureInput({
             这是灵感（进想法库，不提醒）
           </ThemedText>
         </Pressable>
+      ) : null}
+
+      {/*
+        轻提示：非阻塞、自退场（2.5 秒或下次提交时清掉），不挡记录流，不算新工序。
+        当前只装「AI 没读懂，已按原话保存」一种（见 submit）。
+      */}
+      {notice ? (
+        <View style={styles.notice} pointerEvents="none">
+          <ThemedText type="small" themeColor="textSecondary">
+            {notice}
+          </ThemedText>
+        </View>
       ) : null}
 
       <DateTimeSheet
@@ -591,6 +732,21 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
     borderRadius: Spacing.two,
+    minWidth: 56,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  notice: {
+    alignItems: 'center',
+    paddingVertical: Spacing.one,
+  },
+  voice: {
+    width: 36,
+    height: 36,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: Spacing.two,
+    borderWidth: StyleSheet.hairlineWidth,
   },
   quickRow: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.one },
   quickButton: {

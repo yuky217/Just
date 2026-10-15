@@ -47,6 +47,7 @@ import {
 } from '@/domain/course';
 import { describeEvent, type CalEvent } from '@/domain/event';
 import { TaskStatus } from '@/domain/enums';
+import { periodDayKeys, predictPeriod } from '@/domain/period';
 import {
   describeMark,
   markLine,
@@ -185,7 +186,23 @@ export default function CalendarScreen() {
   // 考试同理：一学期十来场，全量放 store，页面按日期分桶
   const events = useAppStore((state) => state.events);
   // 纪念日也全量在 store：它就那么几个日子，月历的圆点和日卡里的行都从这儿出
-  const marks = useAppStore((state) => state.marks);
+  const allMarks = useAppStore((state) => state.marks);
+  /** 纪念日开关：关掉后月历圆点、月历清单、日卡那一行、底部那一整条都不出现 */
+  const marksOn = useSettings((state) => state.features.marks ?? true);
+  /**
+   * 纪念日关掉：**数据源头空掉**，而不是在四处渲染点各判一次。
+   *
+   * 月历圆点、月历清单、日卡里那一行全都是从 `marks` 派生的，
+   * 源头空了它们自然就不出现 —— 一处改动、四处干净，
+   * 也不会出现"圆点没了但清单里还有"这种漏掉一处的半吊子状态。
+   */
+  const marks = marksOn ? allMarks : [];
+  /** 经期记录：月历圆点由它 + 预测一起算出来 */
+  const periodLogs = useAppStore((state) => state.periodLogs);
+  /** 经期开关：关掉后月历的经期圆点整块不出现 */
+  const periodOn = useSettings((state) => state.features.period ?? true);
+  const periodCycleLength = useSettings((state) => state.periodCycleLength);
+  const periodLength = useSettings((state) => state.periodLength);
   const saveCourse = useAppStore((state) => state.saveCourse);
   /** 时间轴上圈出一段之后落库的那一步（唯一出口，见 state/app-store） */
   const createScheduledTask = useAppStore((state) => state.createScheduledTask);
@@ -211,6 +228,12 @@ export default function CalendarScreen() {
   const [monthOpen, setMonthOpenState] = useState(false);
   /** 选中那天那张卡里的"加到这天"草稿 */
   const [dayDraft, setDayDraft] = useState('');
+  /**
+   * 「加到这天」那一行默认收起（2026-10-13）：它此前常驻在当天卡底部，
+   * 而大多数时候人只是来看这天有什么。收成卡头一枚「＋」，点开才出现 ——
+   * 打开后加完一条不清场，接着写下一条。
+   */
+  const [dayAddOpen, setDayAddOpen] = useState(false);
   const [addingToDay, setAddingToDay] = useState(false);
   /**
    * 刚圈出来、还没起名的那条日程（null = 没在新建）。
@@ -374,6 +397,19 @@ export default function CalendarScreen() {
   const focusDay = useCallback((date: Date) => transition('day', dayKey(date)), [transition]);
 
   /**
+   * 点标题 / 底部「回到今天」：带平滑动画跳回今天。
+   *
+   * 走 `transition` 而不是裸 `setState`：原来直接设 cursor/selected 是"啪"地一跳，
+   * 和翻页/切视图的手感不一致；现在同一条淡入上移，视觉上是连续回程。
+   * 已经在这天则 `transition` 直接 early-return，不会多此一举地闪一下。
+   * 四种视图同一个答案：`dayKey(new Date())` 既是日视图要去的那天，
+   * 也是月/周/课游标要落回的"今天所在的那一月/周/教学周"。
+   */
+  const goToToday = useCallback(() => {
+    transition(mode, dayKey(new Date()));
+  }, [mode, transition]);
+
+  /**
    * 点课程块 → 打开**这一块自己的面板**（改这一次 / 这一次不上 / 去改整学期）。
    *
    * 为什么不直接进课程详情：单次调课必须知道"是哪一次"，也就是哪一天的那一块。
@@ -522,6 +558,21 @@ export default function CalendarScreen() {
     }
     return map;
   }, [marks]);
+
+  /**
+   * 经期圆点：把"已记的几次 + 预测的下一次"摊成一组日子。
+   * 关掉功能时不算（返回 undefined，CalendarMonth 收到就整块不画）。
+   * 这里**不并进 monthCounts**：经期是另一套语义（生理周期），
+   * 不该让"那天有几件事"的计数凭空 +1，把月历圆点配额挤歪。
+   */
+  const periodByDay = useMemo(() => {
+    if (!periodOn) return undefined;
+    const forecast = predictPeriod(periodLogs, { cycleLength: periodCycleLength, periodLength });
+    const period = periodDayKeys(periodLogs, forecast);
+    const map = new Map<string, 'period'>();
+    for (const k of period) map.set(k, 'period');
+    return map;
+  }, [periodOn, periodLogs, periodCycleLength, periodLength]);
 
   /** 底部那张"快到的日子"卡：挑法与原来首页那张同一份口径 */
   const upcomingMarks = useMemo(
@@ -813,24 +864,19 @@ export default function CalendarScreen() {
    * 月历下拉展开的那张清单：这个月每天都有什么。
    *
    * 组装在 `domain/month-plan` —— 只收属于这个月的日子、每天最多三件事，
-   * 页面只负责把上面已经分好桶的三类数据（任务 / 考试 / 纪念日）递进去，
-   * 课则在里面按天现算（调课、停课都算得进去）。
+   * 页面只负责把上面已经分好桶的三类数据（任务 / 考试 / 纪念日）递进去。
+   *
+   * ⚠️ **课不递进去**（2026-10-13 用户点名）：课是学期的背景，不是"这天被安排的事"，
+   * 每周都来的东西列进清单等于没信息，还会把"哪天真的多了一件事"淹掉。
+   * 课在月历的空心点、课表栏、日视图的背景带上都看得见，不需要第四处。
    */
   const monthPlan = useMemo(
-    // 别的视图里没有月历可拉，别为一张看不见的清单去算 42 天的课
+    // 别的视图里没有月历可拉，别为一张看不见的清单去算 42 天
     () =>
       mode === 'month'
-        ? buildMonthPlan({
-            month: cursor,
-            tasksByDay,
-            examsByDay,
-            marksByDay,
-            courses,
-            term,
-            timetableOn,
-          })
+        ? buildMonthPlan({ month: cursor, tasksByDay, examsByDay, marksByDay })
         : [],
-    [courses, cursor, examsByDay, marksByDay, mode, tasksByDay, term, timetableOn],
+    [cursor, examsByDay, marksByDay, mode, tasksByDay],
   );
 
   /**
@@ -1089,6 +1135,8 @@ export default function CalendarScreen() {
                 onOpenFull={() => router.push('/inbox')}
                 // 拖起来了就收起，让出下方的日期格
                 collapseWhen={draggingTask !== null}
+                // 拖起的那一行变淡（拿起反馈），见 inbox-panel 的 draggingId
+                draggingId={draggingTask?.id ?? null}
               />
             </View>
           ) : null}
@@ -1172,10 +1220,8 @@ export default function CalendarScreen() {
             <NavButton label="‹" onPress={() => pageBy(-1)} />
             <Pressable
               accessibilityRole="button"
-              onPress={() => {
-                setCursor(new Date());
-                setSelected(new Date());
-              }}>
+              accessibilityLabel="回到今天"
+              onPress={goToToday}>
               <ThemedText type="smallBold">{headerLabel}</ThemedText>
             </Pressable>
             <NavButton label="›" onPress={() => pageBy(1)} />
@@ -1201,6 +1247,7 @@ export default function CalendarScreen() {
                         onSelectDay={setSelected}
                         countsByDay={monthCounts}
                         marksByDay={dayMarks}
+                        periodByDay={periodByDay}
                         registerCell={registerCell}
                         dropTargetKey={dropTargetKey}
                       />
@@ -1217,7 +1264,20 @@ export default function CalendarScreen() {
                     </View>
                   </GestureDetector>
                   <Card
-                    title={`${isSameDay(selected, now) ? '今天' : format(selected, 'M月d日')} · ${selectedTasks.length + selectedExams.length} 件`}>
+                    title={`${isSameDay(selected, now) ? '今天' : format(selected, 'M月d日')} · ${selectedTasks.length + selectedExams.length} 件`}
+                    right={
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={dayAddOpen ? '收起' : '加到这天'}
+                        hitSlop={8}
+                        onPress={() => setDayAddOpen((value) => !value)}>
+                        <Ionicons
+                          name={dayAddOpen ? 'close' : 'add'}
+                          size={20}
+                          color={theme.text}
+                        />
+                      </Pressable>
+                    }>
                     {/* 纪念日排在最前：它不是"一件事"，是这一天本身的底色 */}
                     {selectedMarks.map((view) => (
                       <Pressable
@@ -1254,7 +1314,7 @@ export default function CalendarScreen() {
                           onComplete={guardedToggle}
                         />
                       ))
-                    ) : selectedExams.length || selectedMarks.length ? null : (
+                    ) : selectedExams.length || selectedMarks.length || dayAddOpen ? null : (
                       <ThemedText type="small" themeColor="textSecondary">
                         这一天没有安排
                       </ThemedText>
@@ -1262,40 +1322,43 @@ export default function CalendarScreen() {
 
                     {/*
                       「加到这天」：记下来的就直接属于这天，月历上立刻有点。
-                      常驻一行（不用先点「＋」再展开）—— 用户走到这一步已经决定了
-                      "这天要加一件"，再让他点一次只是多一次操作。
+                      2026-10-13 起默认收起（见 dayAddOpen 的注释）——
+                      点卡头那枚「＋」展开；加完一条不清场，接着写下一条。
                     */}
-                    <View
-                      style={[
-                        styles.dayAdd,
-                        { borderColor: theme.backgroundSelected, backgroundColor: theme.background },
-                      ]}>
-                      <Ionicons name="add" size={16} color={theme.textSecondary} />
-                      <TextInput
-                        value={dayDraft}
-                        onChangeText={setDayDraft}
-                        onSubmitEditing={() => void addToSelectedDay()}
-                        placeholder={`加到 ${format(selected, 'M月d日')}`}
-                        placeholderTextColor={theme.textSecondary}
-                        returnKeyType="done"
-                        style={[styles.dayAddInput, { color: theme.text }]}
-                      />
-                      {dayDraft.trim() ? (
-                        <Pressable
-                          accessibilityRole="button"
-                          accessibilityLabel={`加到 ${format(selected, 'M月d日')}`}
-                          disabled={addingToDay}
-                          onPress={() => void addToSelectedDay()}
-                          style={({ pressed }) => [
-                            styles.dayAddButton,
-                            { backgroundColor: theme.text, opacity: pressed ? 0.8 : 1 },
-                          ]}>
-                          <ThemedText type="smallBold" style={{ color: theme.background }}>
-                            加
-                          </ThemedText>
-                        </Pressable>
-                      ) : null}
-                    </View>
+                    {dayAddOpen ? (
+                      <View
+                        style={[
+                          styles.dayAdd,
+                          { borderColor: theme.backgroundSelected, backgroundColor: theme.background },
+                        ]}>
+                        <Ionicons name="add" size={16} color={theme.textSecondary} />
+                        <TextInput
+                          value={dayDraft}
+                          onChangeText={setDayDraft}
+                          onSubmitEditing={() => void addToSelectedDay()}
+                          placeholder={`加到 ${format(selected, 'M月d日')}`}
+                          placeholderTextColor={theme.textSecondary}
+                          returnKeyType="done"
+                          autoFocus
+                          style={[styles.dayAddInput, { color: theme.text }]}
+                        />
+                        {dayDraft.trim() ? (
+                          <Pressable
+                            accessibilityRole="button"
+                            accessibilityLabel={`加到 ${format(selected, 'M月d日')}`}
+                            disabled={addingToDay}
+                            onPress={() => void addToSelectedDay()}
+                            style={({ pressed }) => [
+                              styles.dayAddButton,
+                              { backgroundColor: theme.text, opacity: pressed ? 0.8 : 1 },
+                            ]}>
+                            <ThemedText type="smallBold" style={{ color: theme.background }}>
+                              加
+                            </ThemedText>
+                          </Pressable>
+                        ) : null}
+                      </View>
+                    ) : null}
                   </Card>
 
                   {/*
@@ -1304,30 +1367,33 @@ export default function CalendarScreen() {
                     不值得占一整张卡（那张卡以前还自带标题、提示、三行排版）。
                     没有快到的日子时这一行也不空着，它就是进纪念日页的入口。
                   */}
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel="纪念日"
-                    onPress={() => router.push('/marks')}
-                    style={({ pressed }) => [styles.markStrip, { opacity: pressed ? 0.6 : 1 }]}>
-                    <Ionicons name="gift-outline" size={15} color={theme.textSecondary} />
-                    {upcomingMarks.length ? (
-                      <ThemedText type="small" numberOfLines={1} style={styles.markStripText}>
-                        {markLine(upcomingMarks[0])} · {upcomingMarks[0].mark.title}
+                  {/* 纪念日关了：这一整条都不出现 —— 它唯一的去处就是纪念日页 */}
+                  {marksOn ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="纪念日"
+                      onPress={() => router.push('/marks')}
+                      style={({ pressed }) => [styles.markStrip, { opacity: pressed ? 0.6 : 1 }]}>
+                      <Ionicons name="gift-outline" size={15} color={theme.textSecondary} />
+                      {upcomingMarks.length ? (
+                        <ThemedText type="small" numberOfLines={1} style={styles.markStripText}>
+                          {markLine(upcomingMarks[0])} · {upcomingMarks[0].mark.title}
+                        </ThemedText>
+                      ) : (
+                        <ThemedText
+                          type="small"
+                          themeColor="textSecondary"
+                          numberOfLines={1}
+                          style={styles.markStripText}>
+                          {marks.length ? '还没有快到的日子' : '记一个还剩几天的日子'}
+                        </ThemedText>
+                      )}
+                      <ThemedText type="small" themeColor="textSecondary">
+                        {marks.length ? '全部' : '去添加'}
                       </ThemedText>
-                    ) : (
-                      <ThemedText
-                        type="small"
-                        themeColor="textSecondary"
-                        numberOfLines={1}
-                        style={styles.markStripText}>
-                        {marks.length ? '还没有快到的日子' : '记一个还剩几天的日子'}
-                      </ThemedText>
-                    )}
-                    <ThemedText type="small" themeColor="textSecondary">
-                      {marks.length ? '全部' : '去添加'}
-                    </ThemedText>
-                    <Ionicons name="chevron-forward" size={14} color={theme.textSecondary} />
-                  </Pressable>
+                      <Ionicons name="chevron-forward" size={14} color={theme.textSecondary} />
+                    </Pressable>
+                  ) : null}
                   {/*
                     待办抽屉已移到屏幕底部常驻（见页面外层 bottomBar）——
                     它以前待在滚动流的最末尾，手机上一滚就跑到屏幕外，

@@ -1,0 +1,13 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+  <!--
+    Android 11+ 的包可见性：不声明就 query 不到系统语音识别组件，
+    isAvailable() 会误报"这台设备没有"。这里只影响"看得见"，
+    不影响"启动"—— startActivity 解析隐式 Intent 由系统完成，不受此限制。
+  -->
+  <queries>
+    <intent>
+      <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
+    </intent>
+  </queries>
+</manifest>

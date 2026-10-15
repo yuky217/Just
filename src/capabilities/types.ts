@@ -59,6 +59,13 @@ export const AI_CAPABILITIES: readonly AiCapabilityMeta[] = [
     description: '开启后，任务详情页出现「拆解」，让模型先给一版步骤',
   },
   {
+    /**
+     * ✅ **已接线**（2026-10-13）：待办页「还没排时间」档头的「帮我排」用它。
+     *
+     * 口径先在 domain 定死（`domain/schedule-suggest.ts`：未来一周窗口、
+     * 单段时长上下限、四道净化闸），界面入口只在能力开着且配了接口时出现
+     * —— 与「拆解」同一条纪律（界面不许拿没接线的开关承诺任何事）。
+     */
     id: AiCapability.Schedule,
     name: '排期',
     description: '按优先级和空闲时间建议安排',
@@ -163,8 +170,13 @@ export class AiDisabledError extends Error {
  * 而不是"凑合着用一半" —— 一条被 AI 理解错的日程，用户看不出来是错的。
  */
 export interface CapabilitySpec<T = unknown> {
-  /** 系统提示词。把 `now` 交给它，模型才知道"明天"是哪一天 */
-  system: (now: Date) => string;
+  /**
+   * 系统提示词。把 `now` 交给它，模型才知道"明天"是哪一天。
+   *
+   * `context` 是调用方递进来的附加条件（如排期的"未来几天 / 每天哪个时段"）——
+   * 它跟 `user` 那句原文不是一回事：原文是用户说的话，context 是用户调的设置。
+   */
+  system: (now: Date, context?: Record<string, unknown>) => string;
   /** 用户消息（已脱敏的原文） */
   user: (text: string, context?: Record<string, unknown>) => string;
   /** 校验并映射成结构化结果；null = 不合格 */

@@ -13,6 +13,7 @@ import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { buildHeatmap } from '@/domain/checkins';
 import type { FocusSession } from '@/domain/focus';
+import { isCheckinOn } from '@/domain/features';
 import {
   buildReview,
   describeFocusDuration,
@@ -27,6 +28,7 @@ import {
 } from '@/domain/review';
 import { useTheme } from '@/hooks/use-theme';
 import { useAppStore } from '@/state/app-store';
+import { useSettings } from '@/state/settings-store';
 import { formatMonthDay } from '@/utils/datetime';
 
 /**
@@ -52,6 +54,17 @@ export default function ReviewScreen() {
   const habits = useAppStore((state) => state.habits);
   const containers = useAppStore((state) => state.containers);
   const loadFocusSessions = useAppStore((state) => state.loadFocusSessions);
+
+  /*
+   * 功能开关：这一页是把"习惯 / 打卡 / 项目"三样东西**汇总**给人看的地方，
+   * 所以关掉哪一样，它对应的那一段就必须跟着消失 ——
+   * 留着一堆"打卡 0 次""按清单分组"等于在回顾一个已经不存在的功能。
+   * （页面本身只有一个入口：首页那颗回顾图标，关掉回顾它根本进不来。）
+   */
+  const features = useSettings((state) => state.features);
+  const habitsOn = features.habits ?? true;
+  const checkinOn = isCheckinOn(features);
+  const projectsOn = features.projects ?? true;
 
   const [preset, setPreset] = useState<ReviewPreset>('week');
   const [sessions, setSessions] = useState<FocusSession[]>([]);
@@ -152,7 +165,10 @@ export default function ReviewScreen() {
             <View style={styles.statRow}>
               <Stat value={`${taskReview.completedInRange}`} unit="件" label="已完成" />
               <Stat value={describeFocusDuration(focus.totalSeconds)} label="专注时长" />
-              <Stat value={`${snapshot.checkinCount}`} unit="次" label="打卡" />
+              {/* 打卡关了：这个数字没有来源（按钮都没了），不再占一格 */}
+              {checkinOn ? (
+                <Stat value={`${snapshot.checkinCount}`} unit="次" label="打卡" />
+              ) : null}
             </View>
           </Card>
 
@@ -202,7 +218,7 @@ export default function ReviewScreen() {
               </View>
             ) : null}
 
-            {topContainers.length ? (
+            {projectsOn && topContainers.length ? (
               <View style={styles.groupBlock}>
                 <ThemedText type="small" themeColor="textSecondary">
                   按清单 / 目标
@@ -228,6 +244,7 @@ export default function ReviewScreen() {
           </Card>
 
           {/* 习惯：连续天数是全局的，本期只决定"这段时间打了几次" */}
+          {habitsOn ? (
           <Card
             title="习惯"
             hint={snapshot.habits.length ? undefined : '把一条任务的类型设成「习惯」，就能在这里看到累积'}
@@ -235,7 +252,8 @@ export default function ReviewScreen() {
               snapshot.habits.length ? (
                 <Pressable onPress={() => router.push('/habits')}>
                   <ThemedText type="small" themeColor="textSecondary">
-                    去打卡
+                    {/* 打卡关了就别说"去打卡"—— 那儿没有这个动作了 */}
+                    {checkinOn ? '去打卡' : '全部'}
                   </ThemedText>
                 </Pressable>
               ) : null
@@ -251,19 +269,24 @@ export default function ReviewScreen() {
                       本期 {habit.inRange} 次 · {Math.round(habit.coverage * 100)}%
                     </ThemedText>
                   </View>
-                  <CheckinHeatmap
-                    cells={buildHeatmap(habit.dayKeys, range.days)}
-                    weeks={heatmapWeeks(range.days)}
-                    cellSize={11}
-                  />
-                  <ThemedText type="small" themeColor="textSecondary" style={styles.footnote}>
-                    {habit.streak.current > 0
-                      ? `连续 ${habit.streak.current} 天`
-                      : habit.streak.total > 0
-                        ? `已中断 · 最长 ${habit.streak.longest} 天`
-                        : '还没打过卡'}
-                    {` · 累计 ${habit.streak.total} 次 · 最长 ${habit.streak.longest} 天`}
-                  </ThemedText>
+                  {/* 打卡关了：热力图与"连续几天"都是打卡痕迹，一并收起来 */}
+                  {checkinOn ? (
+                    <>
+                      <CheckinHeatmap
+                        cells={buildHeatmap(habit.dayKeys, range.days)}
+                        weeks={heatmapWeeks(range.days)}
+                        cellSize={11}
+                      />
+                      <ThemedText type="small" themeColor="textSecondary" style={styles.footnote}>
+                        {habit.streak.current > 0
+                          ? `连续 ${habit.streak.current} 天`
+                          : habit.streak.total > 0
+                            ? `已中断 · 最长 ${habit.streak.longest} 天`
+                            : '还没打过卡'}
+                        {` · 累计 ${habit.streak.total} 次 · 最长 ${habit.streak.longest} 天`}
+                      </ThemedText>
+                    </>
+                  ) : null}
                 </View>
               ))
             ) : (
@@ -272,6 +295,7 @@ export default function ReviewScreen() {
               </ThemedText>
             )}
           </Card>
+          ) : null}
         </>
       ) : null}
     </Screen>

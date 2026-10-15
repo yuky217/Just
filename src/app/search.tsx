@@ -10,6 +10,7 @@ import { Spacing } from '@/constants/theme';
 import { searchAll, type SearchGroupKey } from '@/domain/search';
 import { useTheme } from '@/hooks/use-theme';
 import { useAppStore } from '@/state/app-store';
+import { useSettings } from '@/state/settings-store';
 
 /**
  * 全库搜索（2026-10-10）。
@@ -35,10 +36,33 @@ export default function SearchScreen() {
   const marks = useAppStore((state) => state.marks);
   const ideas = useAppStore((state) => state.ideas);
 
+  /*
+   * 关掉的功能不参与搜索 —— 否则搜出来一条，点进去是一片已经消失的界面，
+   * 那就是死链。数据一条没删（还在库里），只是这一页不再替它列出来。
+   */
+  const features = useSettings((state) => state.features);
   const groups = useMemo(
-    () => searchAll(keyword, { tasks, containers, courses, marks, ideas }),
-    [containers, courses, ideas, keyword, marks, tasks],
+    () =>
+      searchAll(keyword, {
+        tasks,
+        containers: features.projects ? containers : [],
+        courses,
+        marks: features.marks ? marks : [],
+        ideas: features.ideas ? ideas : [],
+      }),
+    [containers, courses, features.ideas, features.marks, features.projects, ideas, keyword, marks, tasks],
   );
+
+  /** 空态里那句"都搜哪些"，跟着开关走 —— 别承诺一个已经关掉的东西 */
+  const scopeText = [
+    '任务',
+    features.projects ? '项目' : null,
+    '课程',
+    features.marks ? '纪念日' : null,
+    features.ideas ? '想法' : null,
+  ]
+    .filter((item): item is string => Boolean(item))
+    .join('、');
 
   /** 每一条点回它自己的家 */
   const openHit = useCallback(
@@ -140,7 +164,7 @@ export default function SearchScreen() {
           hint={
             searching
               ? '试试少写几个字 —— 它按字面找，记不清原话就先搜个词'
-              : '任务、项目、课程、纪念日、想法，一次全找'
+              : `${scopeText}，一次全找`
           }
         />
       )}

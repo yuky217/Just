@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Switch, TextInput, View } from 'react-native';
+import { AppState, Platform, Pressable, StyleSheet, Switch, TextInput, View } from 'react-native';
 
 import { Card } from '@/components/card';
 import { ChoiceSheet } from '@/components/choice-sheet';
@@ -13,6 +13,12 @@ import { Spacing } from '@/constants/theme';
 import { TimeAttribute } from '@/domain/enums';
 import { FOCUS_MINUTE_PRESETS, type FocusSession } from '@/domain/focus';
 import type { Task } from '@/domain/task';
+import {
+  getFocusBarSupport,
+  hideFocusBar,
+  requestOverlayPermission,
+  showFocusBar,
+} from '@/entry/overlay';
 import { useTheme } from '@/hooks/use-theme';
 import { useAppStore } from '@/state/app-store';
 import { useSettings } from '@/state/settings-store';
@@ -40,6 +46,7 @@ export default function FocusScreen() {
 
   const defaultMinutes = useSettings((state) => state.defaultFocusMinutes);
   const hapticsEnabled = useSettings((state) => state.hapticsEnabled);
+  const focusFloatEnabled = useSettings((state) => state.focusFloatEnabled);
 
   const startFocus = useAppStore((state) => state.startFocus);
   const finishFocus = useAppStore((state) => state.finishFocus);
@@ -65,10 +72,15 @@ export default function FocusScreen() {
   const sessionIdRef = useRef<string | null>(null);
   const sessionRef = useRef<FocusSession | null>(null);
   const finishedRef = useRef(false);
+  const runningRef = useRef(true);
 
   useEffect(() => {
     elapsedRef.current = elapsed;
   }, [elapsed]);
+
+  useEffect(() => {
+    runningRef.current = running;
+  }, [running]);
 
   useEffect(() => {
     sessionIdRef.current = sessionId;
@@ -121,14 +133,61 @@ export default function FocusScreen() {
     return () => clearInterval(timer);
   }, [running]);
 
+  /*
+   * 专注时间浮条（2026-10-13）：专注中退出应用 → 在别的应用之上浮一条走字的小条；
+   * 回到应用 / 这场结束 → 收起来。设置里可关（focusFloatEnabled）。
+   *
+   * 状态怎么传给原生：**不每秒同步**。只在这一刻把三样东西交给它 ——
+   * 虚拟起点（跑着时 = now - 已跑时长）、已攒时长（暂停时用）、暂停与否，
+   * 之后每秒的字由原生自己走。JS 侧唯一要再说话的时刻是"收起来"。
+   *
+   * 差「显示在其他应用上层」授权时顺手跳授权页（系统弹窗），
+   * 授权结果由设置页的 AppState 监听收口；用户不给就安安静静不浮，
+   * 不每次退后台都弹一遍。
+   */
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    const subscription = AppState.addEventListener('change', (next) => {
+      if (next === 'active') {
+        void hideFocusBar();
+        return;
+      }
+      if (next !== 'background') return;
+      if (!useSettings.getState().focusFloatEnabled) return;
+      if (!sessionIdRef.current) return; // 会话还没开起来（极少见）：不浮
+      void (async () => {
+        const support = await getFocusBarSupport();
+        if (support.status === 'need-permission') {
+          await requestOverlayPermission();
+          return;
+        }
+        if (support.status !== 'ready') return;
+        const seconds = elapsedRef.current;
+        if (runningRef.current) {
+          await showFocusBar({
+            startedAtMs: Date.now() - seconds * 1000,
+            accumulatedMs: 0,
+            paused: false,
+          });
+        } else {
+          // 暂停中：字停在已攒的时长上，不跟着墙上时钟走
+          await showFocusBar({ startedAtMs: Date.now(), accumulatedMs: seconds * 1000, paused: true });
+        }
+      })();
+    });
+    return () => subscription.remove();
+  }, []);
+
   /**
    * 离开页面时兜底收尾，避免留下永远不会结束的会话。
    *
    * 刻意**不带 markDone** —— 从右上角退出去不等于"我做完了"，
    * 那只是"我不记了"。真正的完成判定只发生在用户按下「结束」那一刻。
+   * 顺手把浮条也收掉：会话都结束了，浮着的时间就没有主语了。
    */
   useEffect(() => {
     return () => {
+      void hideFocusBar();
       if (finishedRef.current) return;
       const id = sessionIdRef.current;
       if (!id) return;
@@ -178,7 +237,31 @@ export default function FocusScreen() {
             不记了
           </ThemedText>
         </Pressable>
-      }>
+      }
+    >
+      {/*
+        直达检索栏（2026-10-13）：专注中想查点东西（这件事排哪天、那个想法记在哪），
+        不用先退出专注。做成搜索框的样子而不是一颗放大镜 —— "能查"要看得见，
+        不然没人知道专注页里还埋着检索。
+      */}
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="搜索"
+        onPress={() => router.push('/search')}
+        style={({ pressed }) => [
+          styles.searchBar,
+          {
+            backgroundColor: theme.backgroundElement,
+            borderColor: theme.backgroundSelected,
+            opacity: pressed ? 0.7 : 1,
+          },
+        ]}>
+        <Ionicons name="search-outline" size={16} color={theme.textSecondary} />
+        <ThemedText type="small" themeColor="textSecondary">
+          搜任务、想法、课表…
+        </ThemedText>
+      </Pressable>
+
       {/* 主角：时间 */}
       <View style={styles.timerBlock}>
         <ThemedText style={styles.timer}>{formatDuration(elapsed)}</ThemedText>
@@ -196,7 +279,7 @@ export default function FocusScreen() {
       </View>
 
       <View style={styles.orbBlock}>
-        <GrowthOrb seconds={elapsed} size={104} caption={null} />
+        <GrowthOrb seconds={elapsed} size={104} />
       </View>
 
       {/* 名字与随手记：没有任何常驻说明 —— 输入框自己说得清。
@@ -289,6 +372,15 @@ export default function FocusScreen() {
 }
 
 const styles = StyleSheet.create({
+  searchBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+    borderRadius: Spacing.three,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
   timerBlock: { alignItems: 'center', gap: Spacing.two, paddingTop: Spacing.five },
   planRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three, flexWrap: 'wrap', justifyContent: 'center' },
   planChip: {

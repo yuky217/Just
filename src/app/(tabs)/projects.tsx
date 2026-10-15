@@ -1,7 +1,15 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useMemo, useState } from 'react';
-import { Modal, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import {
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  Pressable,
+  StyleSheet,
+  TextInput,
+  View,
+} from 'react-native';
 
 import { Card } from '@/components/card';
 import { ChoiceSheet } from '@/components/choice-sheet';
@@ -29,6 +37,10 @@ import { useAppStore } from '@/state/app-store';
  *
  * 甘特图在这里是**视图**而不是新实体：它读的就是容器的 startAt/endAt
  * 加上成员任务的时间，没有自己的表、自己的状态。
+ *
+ * ⭐ 新建入口（2026-10-13）：页头一枚「＋」+ 一块贴底的面板。
+ * 以前「＋」点开的是一张**整宽卡片**压在最上面，把列表整个推下去又弹回来；
+ * 而"建一个新摊子"只值一个名字加一个类型 —— 犯不上占掉上方一整栏。
  */
 const KIND_ORDER: ContainerKind[] = [ContainerKind.Goal, ContainerKind.Project];
 
@@ -153,70 +165,21 @@ export default function ProjectsScreen() {
       /* 没有页头（2026-10-10）：底部 Tab 栏已经写着「项目」 */
       scrollEnabled={!ganttDragging}
       right={
-        <View style={styles.headerActions}>
-          <Pressable hitSlop={8} onPress={() => setCreating((value) => !value)}>
-            <Ionicons name={creating ? 'close' : 'add'} size={24} color={theme.text} />
-          </Pressable>
-        </View>
+        /*
+          新建入口就只有这一枚「＋」（2026-10-13 用户点名）。
+          以前它点开是一张**整宽卡片**压在最上面：表单把下面的列表整个推下去，
+          关掉又弹回来 —— 而"建一个项目"只值一个名字加一个类型，
+          犯不上占掉上方一整栏。现在它拉起来一块贴底的面板（与习惯页同一副骨架）。
+        */
+        <Pressable
+          hitSlop={8}
+          accessibilityRole="button"
+          accessibilityLabel="新建目标或项目"
+          onPress={() => setCreating(true)}>
+          <Ionicons name="add" size={24} color={theme.text} />
+        </Pressable>
       }>
-      {creating ? (
-        <Card title="新建">
-          <TextInput
-            value={title}
-            onChangeText={setTitle}
-            placeholder="给它起个名字"
-            placeholderTextColor={theme.textSecondary}
-            autoFocus
-            onSubmitEditing={() => void submit()}
-            style={[
-              styles.input,
-              {
-                color: theme.text,
-                backgroundColor: theme.background,
-                borderColor: theme.backgroundSelected,
-              },
-            ]}
-          />
-          <View style={styles.chips}>
-            {KIND_ORDER.map((option) => {
-              const active = kind === option;
-              return (
-                <Pressable
-                  key={option}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected: active }}
-                  onPress={() => setKind(option)}
-                  style={[
-                    styles.chip,
-                    {
-                      backgroundColor: active ? theme.text : theme.background,
-                      borderColor: active ? theme.text : theme.backgroundSelected,
-                    },
-                  ]}>
-                  <ThemedText
-                    type="small"
-                    style={{ color: active ? theme.background : theme.text }}>
-                    {CONTAINER_KIND_LABEL[option]}
-                  </ThemedText>
-                </Pressable>
-              );
-            })}
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => void submit()}
-              style={[styles.chip, { backgroundColor: theme.text, borderColor: theme.text }]}>
-              <ThemedText type="small" style={{ color: theme.background }}>
-                建好
-              </ThemedText>
-            </Pressable>
-          </View>
-          <ThemedText type="small" themeColor="textSecondary" style={styles.footnote}>
-            目标看方向、项目看进度
-          </ThemedText>
-        </Card>
-      ) : null}
-
-      {!creating && !containers.length ? (
+      {!containers.length ? (
         <Card>
           <EmptyState
             icon="albums-outline"
@@ -369,12 +332,114 @@ export default function ProjectsScreen() {
           </Pressable>
         </Pressable>
       </Modal>
+
+      {/*
+        新建目标 / 项目：页头「＋」拉起来的那块面板。
+        只问两件事 —— 名字、类型（默认「项目」，最常见的那个，不改就是对的）。
+        起止时间、归属、甘特图都不在这儿问：那些是建完之后在容器页里慢慢补的东西，
+        而"我要开一个新摊子"这件事本身只有这两项。
+      */}
+      <Modal
+        visible={creating}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setCreating(false)}>
+        <KeyboardAvoidingView
+          style={styles.fill}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <Pressable style={styles.backdrop} onPress={() => setCreating(false)}>
+            <Pressable
+              style={[styles.sheet, { backgroundColor: theme.background }]}
+              onPress={(event) => event.stopPropagation()}>
+              <View style={[styles.handle, { backgroundColor: theme.backgroundSelected }]} />
+              <ThemedText type="smallBold" style={[styles.sheetTitle, { textAlign: 'center' }]}>
+                新建
+              </ThemedText>
+              <TextInput
+                value={title}
+                onChangeText={setTitle}
+                placeholder="给它起个名字"
+                placeholderTextColor={theme.textSecondary}
+                autoFocus
+                returnKeyType="done"
+                onSubmitEditing={() => void submit()}
+                style={[
+                  styles.input,
+                  {
+                    color: theme.text,
+                    backgroundColor: theme.backgroundElement,
+                    borderColor: theme.backgroundSelected,
+                  },
+                ]}
+              />
+              <View style={styles.chips}>
+                {KIND_ORDER.map((option) => {
+                  const active = kind === option;
+                  return (
+                    <Pressable
+                      key={option}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected: active }}
+                      onPress={() => setKind(option)}
+                      style={[
+                        styles.chip,
+                        {
+                          backgroundColor: active ? theme.text : theme.background,
+                          borderColor: active ? theme.text : theme.backgroundSelected,
+                        },
+                      ]}>
+                      <ThemedText
+                        type="small"
+                        style={{ color: active ? theme.background : theme.text }}>
+                        {CONTAINER_KIND_LABEL[option]}
+                      </ThemedText>
+                    </Pressable>
+                  );
+                })}
+              </View>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="建好"
+                disabled={!title.trim()}
+                onPress={() => void submit()}
+                style={[
+                  styles.createButton,
+                  { backgroundColor: theme.text, opacity: title.trim() ? 1 : 0.4 },
+                ]}>
+                <ThemedText type="smallBold" style={{ color: theme.background }}>
+                  建好
+                </ThemedText>
+              </Pressable>
+              <ThemedText type="small" themeColor="textSecondary" style={styles.footnote}>
+                目标看方向、项目看进度
+              </ThemedText>
+            </Pressable>
+          </Pressable>
+        </KeyboardAvoidingView>
+      </Modal>
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  headerActions: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three },
+  /** 新建面板（贴底那块）：与习惯页同一副骨架 */
+  fill: { flex: 1 },
+  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)', justifyContent: 'flex-end' },
+  sheet: {
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    paddingHorizontal: Spacing.three,
+    paddingTop: Spacing.two,
+    paddingBottom: Spacing.four,
+    gap: Spacing.two,
+  },
+  handle: { width: 36, height: 4, borderRadius: 2, alignSelf: 'center' },
+  createButton: {
+    alignItems: 'center',
+    paddingVertical: Spacing.two,
+    borderRadius: Spacing.three,
+    marginTop: Spacing.one,
+  },
   input: {
     borderRadius: Spacing.two,
     borderWidth: StyleSheet.hairlineWidth,

@@ -6,8 +6,6 @@ import Animated, { useAnimatedStyle, useSharedValue, type SharedValue } from 're
 import { TaskRow } from '@/components/task-row';
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
-import type { CalendarShape } from '@/domain/calendar-shape';
-import type { CourseSlot } from '@/domain/course';
 import { describeEvent } from '@/domain/event';
 import { markLine } from '@/domain/marks';
 import type { MonthPlanDay } from '@/domain/month-plan';
@@ -35,9 +33,9 @@ import { useTheme } from '@/hooks/use-theme';
  *
  * ## 天里的顺序
  *
- * 纪念日 → 课 → 考试 → 任务，与月历圆点的顺序同源（越往后越要你动手）。
- * 行首的小标记就是月历上的那个圆点：空心＝课 · 方块＝考试 · 实心＝任务 ——
- * 清单和格子说的是同一套形状语言，不用在两处记两套。
+ * 纪念日 → 考试 → 任务。**课不在这张清单里**（2026-10-13，理由见
+ * `domain/month-plan` 的文件头）：课是学期的背景，每天都能列出的东西
+ * 列出来等于没信息；它该在月历空心点、课表栏、日视图背景带上看。
  */
 
 /** 周日…周六（自算中文，不引 date-fns locale） */
@@ -52,7 +50,7 @@ export interface MonthPlanProps {
   /** 展开进度 0..1，由页面上的下拉手势驱动 */
   pull: SharedValue<number>;
   onToggle: () => void;
-  /** 点日期头 / 课行 / 「还有 N 件」—— 去看那天的日视图 */
+  /** 点日期头 / 「还有 N 件」—— 去看那天的日视图 */
   onFocusDay: (date: Date) => void;
   onOpenTask: (task: Task) => void;
   onCompleteTask: (task: Task) => void;
@@ -172,31 +170,11 @@ function DayGroup({ day, first, onFocusDay, onOpenTask, onCompleteTask }: DayGro
         </View>
       ))}
 
-      {/* 课：一天一门课可能占好几节，合并成一行说清是哪些课 */}
-      {day.courses.length ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`看${format(day.date, 'M月d日')}的时间轴`}
-          onPress={() => onFocusDay(day.date)}
-          style={styles.row}>
-          <PlanDot shape="course" tint={theme.textSecondary} />
-          <ThemedText
-            type="small"
-            themeColor="textSecondary"
-            numberOfLines={1}
-            style={styles.rowTitle}>
-            {courseSummary(day.courses)}
-          </ThemedText>
-          <ThemedText type="small" themeColor="textSecondary">
-            {`${courseCount(day.courses)} 门课`}
-          </ThemedText>
-        </Pressable>
-      ) : null}
-
-      {/* 考试：到点就是它，不带完成态，所以不进 TaskRow（那是个能勾的行） */}
+      {/* 考试：到点就是它，不带完成态，所以不进 TaskRow（那是个能勾的行）。
+          行首的方块就是月历上那个方块 —— 清单和格子说同一套形状语言。 */}
       {day.exams.map((event) => (
         <View key={event.id} style={styles.row}>
-          <PlanDot shape="exam" tint={theme.text} />
+          <View style={[styles.dot, styles.dotSquare, { backgroundColor: theme.text }]} />
           <ThemedText type="small" numberOfLines={1} style={styles.rowTitle}>
             {event.title}
           </ThemedText>
@@ -234,32 +212,6 @@ function DayGroup({ day, first, onFocusDay, onOpenTask, onCompleteTask }: DayGro
   );
 }
 
-/** 一门课一天可能排两节，名字只说一次 */
-function courseSummary(courses: readonly CourseSlot[]): string {
-  return [...new Set(courses.map((slot) => slot.course.title))].join(' · ');
-}
-
-function courseCount(courses: readonly CourseSlot[]): number {
-  return new Set(courses.map((slot) => slot.course.title)).size;
-}
-
-/** 行首的小标记就是月历上的那个圆点：空心＝课 · 方块＝考试 · 实心＝任务 */
-function PlanDot({ shape, tint }: { shape: CalendarShape; tint: string }) {
-  return (
-    <View
-      style={[
-        styles.dot,
-        shape === 'course'
-          ? [styles.dotHollow, { borderColor: tint }]
-          : shape === 'exam'
-            ? styles.dotSquare
-            : null,
-        shape !== 'course' ? { backgroundColor: tint } : null,
-      ]}
-    />
-  );
-}
-
 const styles = StyleSheet.create({
   block: {
     borderRadius: Spacing.three,
@@ -287,13 +239,6 @@ const styles = StyleSheet.create({
   },
   rowTitle: { flex: 1 },
   dot: { width: 4, height: 4, borderRadius: 2 },
-  /** 边框宽度必须写在样式里：只给 borderColor 不给宽度，就是一个空气泡 */
-  dotHollow: {
-    width: 4,
-    height: 4,
-    borderRadius: 2,
-    borderWidth: StyleSheet.hairlineWidth * 2,
-    backgroundColor: 'transparent',
-  },
+  /** 考试那个方块：和月历上的方块同一形状（圆角为 0 就是方点） */
   dotSquare: { width: 4, height: 4, borderRadius: 0 },
 });

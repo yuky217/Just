@@ -1,9 +1,11 @@
 import { differenceInCalendarDays, startOfDay } from 'date-fns';
+import { Lunar, LunarYear } from 'lunar-javascript';
 
 import { parseDayKey } from '@/utils/datetime';
 
 import type { Mark } from './container';
 import { MarkKind } from './enums';
+import { parseLunarMd, resolveTermToGregorian } from './lunar';
 
 /**
  * 纪念日（主文档 5.3 的"标记"）。
@@ -120,10 +122,69 @@ export function sortMarkViews(views: MarkView[]): MarkView[] {
  * 月历按它把纪念日点上格子：只看得到"下一次"；已经过去又不重复的日子，
  * 只有翻回那个月才现身 —— 那不是遗漏，翻过那一页本来就该看到它。
  */
+/** 把 Date 压成 'YYYY-MM-DD'，用于"是否已过今天"的字典序比较 */
+function ymdKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/**
+ * 农历 / 节气标记"下一次出现"的公历日（'YYYY-MM-DD'）。
+ * 从今年起往后找第一个 >= now 的那一次：
+ * - 农历：注意闰月年可能没有对应闰月，要跳到下一个有闰月的年份；
+ *         某农历月只有 29 天却要 30 的年份也跳过。
+ * - 节气：每年都有，直接取今年或明年的那次。
+ * 找不到（极端情况）返回 null，调用方按"不显示"处理。
+ */
+function nextMarkOccurrence(mark: Mark, now: Date): string | null {
+  const nowKey = ymdKey(now);
+
+  if (mark.calendar === 'lunar' && mark.lunarMd) {
+    const md = parseLunarMd(mark.lunarMd);
+    if (!md) return null;
+    for (let y = now.getFullYear(); y <= now.getFullYear() + 19; y++) {
+      if (md.leap && LunarYear.fromYear(y).getLeapMonth() !== md.month) continue;
+      let solar: string;
+      try {
+        solar = Lunar.fromYmd(y, md.leap ? -md.month : md.month, md.day).getSolar().toYmd();
+      } catch {
+        continue; // 该农历月没有这一天（29 天月却要 30）
+      }
+      if (solar >= nowKey) return solar;
+    }
+    return null;
+  }
+
+  if (mark.calendar === 'term' && mark.term) {
+    for (let y = now.getFullYear(); y <= now.getFullYear() + 3; y++) {
+      const solar = resolveTermToGregorian(mark.term, y);
+      if (solar >= nowKey) return solar;
+    }
+    return null;
+  }
+
+  return null;
+}
+
 export function nextMarkDate(mark: Mark, now: Date = new Date()): Date | null {
-  const base = parseDayKey(mark.date);
-  if (!base) return null;
-  return mark.repeatYearly ? nextAnnual(base, now) : base;
+  // 公历（含老数据没 calendar 字段的）：沿用原逻辑
+  if ((mark.calendar ?? 'solar') === 'solar') {
+    const base = parseDayKey(mark.date);
+    if (!base) return null;
+    return mark.repeatYearly ? nextAnnual(base, now) : base;
+  }
+  // 农历 / 节气：永远滚到下一次出现（正数日也用这个落点显示在日历上）
+  const occ = nextMarkOccurrence(mark, now);
+  return occ ? parseDayKey(occ) : null;
+}
+
+/**
+ * 同名冲突判定：已存在标题（去空格后）完全一样的标记。
+ * 创建节气纪念日时用来提示"已有同名，要不要合并？"。
+ * `exceptId` 排除自己（编辑场景不会跟自己撞）。
+ */
+export function hasDuplicateTitle(marks: Mark[], title: string, exceptId?: string): boolean {
+  const t = title.trim();
+  return marks.some((m) => m.id !== exceptId && m.title.trim() === t);
 }
 
 /** 日历页卡片：先把"还没发生"的倒数日按远近排出来，不够再用正数日补齐 */

@@ -18,16 +18,16 @@
 html,
 body,
 #root {
-  background: #faf9f7;
-  color: #1b1a18;
+  background: #fbf8f3;
+  color: #1a1713;
 }
 
 @media (prefers-color-scheme: dark) {
   html,
   body,
   #root {
-    background: #111110;
-    color: #f2f0eb;
+    background: #121110;
+    color: #f3efe7;
   }
 }
 

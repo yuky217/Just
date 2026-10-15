@@ -6,8 +6,20 @@ import { coursesOnDate, type Course, type Term } from '@/domain/course';
 import { TaskStatus } from '@/domain/enums';
 import type { CalEvent } from '@/domain/event';
 import { describeEventFire, eventFireAt, type EventFire } from '@/domain/event-reminder';
-import { reminderFireTimes, REMINDER_WINDOW_DAYS } from '@/domain/reminder';
+import {
+  reminderFireTimes,
+  reminderTierOf,
+  REMINDER_WINDOW_DAYS,
+} from '@/domain/reminder';
 import type { Task } from '@/domain/task';
+import {
+  cancelAllNativeReminders,
+  cancelNativeTaskReminders,
+} from './native-reminders';
+
+/** 两个通知渠道：普通走系统默认；重要走一个稍明显的渠道（铃声渠道两档，2026-10-14） */
+export const REMINDER_CHANNEL_NORMAL = 'reminder-normal';
+export const REMINDER_CHANNEL_IMPORTANT = 'reminder-important';
 
 /**
  * 提醒调度。
@@ -127,6 +139,7 @@ export async function sendTestReminder(seconds = 5): Promise<boolean> {
       trigger: {
         type: mod.SchedulableTriggerInputTypes.TIME_INTERVAL,
         seconds: Math.max(1, Math.round(seconds)),
+        channelId: REMINDER_CHANNEL_NORMAL,
       },
     });
     return true;
@@ -190,12 +203,16 @@ function isGranted(permission: { granted?: boolean; status?: string }): boolean 
 async function ensureAndroidChannel(mod: NotificationsModule): Promise<void> {
   if (Platform.OS !== 'android') return;
   try {
-    await mod.setNotificationChannelAsync('default', {
+    await mod.setNotificationChannelAsync(REMINDER_CHANNEL_NORMAL, {
       name: '日程提醒',
       importance: mod.AndroidImportance.DEFAULT,
     });
+    await mod.setNotificationChannelAsync(REMINDER_CHANNEL_IMPORTANT, {
+      name: '重要提醒',
+      importance: mod.AndroidImportance.HIGH,
+    });
   } catch {
-    // 忽略
+    // 忽略：某些运行环境不支持渠道
   }
 }
 
@@ -241,6 +258,15 @@ export async function scheduleTaskReminder(task: Task): Promise<string[]> {
    */
   const body = task.location ? `${when} · ${task.location}` : when;
 
+  /*
+   * 铃声渠道两档（2026-10-14）：重要走 `reminder-important`（importance 更高、稍明显），
+   * 普通走 `reminder-normal`（系统默认）。判定见 `domain/reminder.reminderTierOf`：
+   * 考试 / 出发类 / 临近截止 → 重要；其余 → 普通。
+   * 只做铃声区分，**不做** FSI 弹窗 / 覆盖勿扰 / 持续提醒（那是另一套原生通道）。
+   */
+  const tier = reminderTierOf(task);
+  const channelId = tier === 'important' ? REMINDER_CHANNEL_IMPORTANT : REMINDER_CHANNEL_NORMAL;
+
   try {
     const Notifications = await loadNotifications();
     if (!Notifications) return [];
@@ -262,7 +288,11 @@ export async function scheduleTaskReminder(task: Task): Promise<string[]> {
               data: { taskId: task.id },
               categoryIdentifier: TASK_CATEGORY,
             },
-            trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: fireAt },
+            trigger: {
+              type: Notifications.SchedulableTriggerInputTypes.DATE,
+              date: fireAt,
+              channelId,
+            },
           }),
         );
       } catch {
@@ -314,27 +344,28 @@ export async function syncRepeatingTaskReminders(
     return 0;
   }
 
-  if (!(await hasNotificationPermission(Notifications))) return 0;
-  await ensureAndroidChannel(Notifications);
-  await ensureTaskCategory(Notifications);
+  /*
+   * 原生那一路也要撤：重要 / 截止的重复任务在原生通道里排着，
+   * 光撤 expo 的那份，旧时刻照样会响一次。
+   */
+  for (const task of repeating) {
+    await cancelNativeTaskReminders(task.id);
+  }
 
+  if (!(await hasNotificationPermission(Notifications))) return 0;
+
+  /*
+   * 排的活交给 `scheduleTaskReminder`（2026-10-13）：以前这里自己拼通知体，
+   * 于是"冷启动补排"和"刚记下时排"是两套写法 —— 连提醒正文都不一样
+   * （一个写"到点了"，一个写"还有 10 分钟开始"）。现在两条路同一份口径，
+   * 顺便让补排也自动享受原生通道的分流。
+   */
   let count = 0;
   for (const task of repeating) {
-    for (const fireAt of reminderFireTimes(task, { days })) {
-      try {
-        await Notifications.scheduleNotificationAsync({
-          content: {
-            title: task.title,
-            body: task.location ? `到点了 · ${task.location}` : '到点了',
-            data: { taskId: task.id },
-            categoryIdentifier: TASK_CATEGORY,
-          },
-          trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: fireAt },
-        });
-        count += 1;
-      } catch {
-        // 单条排不上不影响其余
-      }
+    try {
+      count += (await scheduleTaskReminder(task)).length;
+    } catch {
+      // 单条任务排不上不影响其余
     }
   }
   return count;
@@ -348,6 +379,13 @@ export async function syncRepeatingTaskReminders(
  * 不影响其他任务的通知。全程静默容错。
  */
 export async function cancelTaskReminders(taskId: string): Promise<void> {
+  /*
+   * 两条通道都要撤：这条任务可能有一半走原生（重要/截止）、一半走 expo。
+   * 只撤一边，"改了时间却还在旧时刻响一次"的 bug 就还在 ——
+   * 而这一类 bug 用户只会觉得"这软件不准"，说不出是哪一次。
+   */
+  await cancelNativeTaskReminders(taskId);
+
   const Notifications = await loadNotifications();
   if (!Notifications) return;
   try {
@@ -367,6 +405,9 @@ export async function cancelTaskReminders(taskId: string): Promise<void> {
  * 分不清哪些旧通知还作数，全撤再按新库重排是最稳的做法。
  */
 export async function cancelAllReminders(): Promise<void> {
+  // 覆盖导入之后库整体换血，两条通道排的都得跟着清（同上：漏撤一条就是一次"旧时刻响"）
+  await cancelAllNativeReminders();
+
   const Notifications = await loadNotifications();
   if (!Notifications) return;
   try {
@@ -440,14 +481,18 @@ export async function syncCourseReminders(
         .join(' · ');
 
       try {
-        await Notifications.scheduleNotificationAsync({
-          content: {
-            title: slot.course.title,
-            body,
-            data: { courseId: slot.course.id },
-          },
-          trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: fireAt },
-        });
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: slot.course.title,
+          body,
+          data: { courseId: slot.course.id },
+        },
+        trigger: {
+          type: Notifications.SchedulableTriggerInputTypes.DATE,
+          date: fireAt,
+          channelId: REMINDER_CHANNEL_NORMAL,
+        },
+      });
         count += 1;
       } catch {
         // 单条排不上不影响其余
@@ -518,7 +563,12 @@ export async function syncEventReminders(
           body: describeEventFire(event, fire),
           data: { eventId: event.id },
         },
-        trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: fire.at },
+        // 考试天然重要：走"稍明显"渠道（铃声渠道两档，2026-10-14）
+        trigger: {
+          type: Notifications.SchedulableTriggerInputTypes.DATE,
+          date: fire.at,
+          channelId: REMINDER_CHANNEL_IMPORTANT,
+        },
       });
       count += 1;
     } catch {
@@ -702,6 +752,7 @@ export async function scheduleSnoozedReminder(
       trigger: {
         type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
         seconds: Math.max(60, minutes * 60),
+        channelId: REMINDER_CHANNEL_NORMAL,
       },
     });
     return true;
@@ -723,6 +774,70 @@ export async function scheduleSnoozedReminder(
 const DAILY_REMINDER_KIND = 'daily-reminder';
 
 export const DAILY_REMINDER_DEFAULT_HOUR = 8;
+
+/**
+ * 经期提前提醒的标识：重排时只认自己这一种，不会误撤任务/每日提醒。
+ */
+export const PERIOD_REMINDER_KIND = 'period-reminder';
+
+export interface PeriodReminderInput {
+  /** 功能是否开着（features.period）。关掉就只撤不排 */
+  enabled: boolean;
+  /** 预测的下一次来潮日；null = 还没记过，没法预测 */
+  nextStart: Date | null;
+  /** 提前几天提醒（0 = 当天） */
+  reminderDays: number;
+}
+
+/**
+ * 经期提前提醒：功能开着且有预测时，在下一次来潮前 `reminderDays` 天排一条本地通知。
+ *
+ * 与每日提醒同一个套路（先全撤自己这一种、再排）：改开关、改周期长度、记了一次新经期
+ * 都会触发重排，过去的通知不会叠出来。没数据 / 功能关了就只撤不排。
+ * 这是一个"加分项"：没权限、web、模拟器不支持都静默失败，绝不影响记录主流程。
+ *
+ * ⚠️ 提醒时刻已经过去（比如用户记完才发现该提醒的是昨天）就不补 ——
+ * 补一条过去的提醒只会立刻弹出来吓人，没有任何意义。
+ */
+export async function syncPeriodReminders(input: PeriodReminderInput): Promise<boolean> {
+  const Notifications = await loadNotifications();
+  if (!Notifications) return false;
+  try {
+    const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+    for (const item of scheduled) {
+      const data = item.content.data as { kind?: string } | undefined;
+      if (data?.kind === PERIOD_REMINDER_KIND) {
+        await Notifications.cancelScheduledNotificationAsync(item.identifier);
+      }
+    }
+    if (!input.enabled || !input.nextStart) return true;
+
+    registerHandler(Notifications);
+    if (!(await ensureNotificationPermission())) return false;
+    await ensureAndroidChannel(Notifications);
+
+    const fireAt = addDays(input.nextStart, -Math.max(0, input.reminderDays));
+    if (fireAt.getTime() <= Date.now()) return true;
+
+    const days = Math.max(0, input.reminderDays);
+    const body = days > 0 ? `还有 ${days} 天，记得备好用品` : '预计今天来潮';
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: '经期快到了',
+        body,
+        data: { kind: PERIOD_REMINDER_KIND },
+      },
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.DATE,
+        date: fireAt,
+        channelId: REMINDER_CHANNEL_NORMAL,
+      },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * 全撤重排每日提醒。`enabled === false` 时只撤不发（关开关的路径）。
@@ -759,6 +874,7 @@ export async function syncDailyReminder(
         type: Notifications.SchedulableTriggerInputTypes.DAILY,
         hour,
         minute,
+        channelId: REMINDER_CHANNEL_NORMAL,
       },
     });
     return true;

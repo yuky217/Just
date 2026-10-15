@@ -38,6 +38,17 @@ export interface IdeaDeleteUndo {
   ids: readonly string[];
 }
 
+/** 撤销一次「拖拽变子任务」 */
+export interface TaskNestUndo {
+  kind: 'nest';
+  /** 被挂下去的那条任务 */
+  taskId: string;
+  /** 它原本的父任务（null = 本来就是顶层） */
+  prevParentId: string | null;
+  /** 它原本挂在自己下面的子任务（嵌套时退回顶层），撤销时要挂回去 */
+  reparentedSubtaskIds: readonly string[];
+}
+
 export type DeleteUndo = TaskDeleteUndo | IdeaDeleteUndo;
 
 /** 界面文案要用的是"删了几条"，不是凭据长什么样 */

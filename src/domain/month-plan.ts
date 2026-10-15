@@ -1,7 +1,6 @@
 import { format, isSameMonth } from 'date-fns';
 
 import { monthGridDays } from './calendar-window';
-import { coursesOnDate, type Course, type CourseSlot, type Term } from './course';
 import type { CalEvent } from './event';
 import type { MarkView } from './marks';
 import type { Task } from './task';
@@ -22,10 +21,21 @@ import type { Task } from './task';
  * 所以月历仍然只画圆点，名字在**拉开的那一块**里逐天列出来 ——
  * 两个视角各管一件事，日历本身不变形。
  *
+ * ## 课为什么**不**进这张清单（2026-10-13 用户点名）
+ *
+ * 课是**学期的背景**，不是"这一天被安排的事"：它每周都来，一学期几十次，
+ * 列进来只会让每一天看起来都"有安排"，而清单本来要回答的
+ * "哪天有额外的事、哪天轻"就被淹掉了 —— 每天都能列出的东西，
+ * 列出来等于没信息。课该在哪儿看？月历上的空心点、课表那一栏、日视图的背景带，
+ * 三处都在说它，不必再挤进这张按天扫的清单。
+ *
+ * 所以有课没课都**不影响**这一天出不出现在清单里：只有课的那天不出现，
+ * "N 天有安排"数的也只是真的有事的日子。
+ *
  * ## 天内的顺序
  *
- * 纪念日 → 课 → 考试 → 任务，与 `domain/calendar-shape` 的圆点顺序
- * （课 → 考试 → 任务，越往后越要你动手）同源，只把纪念日挪到最前 ——
+ * 纪念日 → 考试 → 任务，与 `domain/calendar-shape` 的圆点顺序
+ * （越往后越要你动手）同源，只把纪念日挪到最前 ——
  * 它不是"一件事"，是这一天的底色（日卡里也是这个位置）。
  */
 
@@ -33,8 +43,6 @@ export interface MonthPlanDay {
   date: Date;
   /** 纪念日（可能多个） */
   marks: MarkView[];
-  /** 那天的课，按"开学第几天"的顺序（换算在 coursesOnDate，含调课/停课） */
-  courses: CourseSlot[];
   /** 那天的考试 */
   exams: CalEvent[];
   /** 那天要做的事（已截断） */
@@ -59,10 +67,6 @@ export interface MonthPlanInput {
   tasksByDay: Map<string, Task[]>;
   examsByDay: Map<string, CalEvent[]>;
   marksByDay: Map<string, MarkView[]>;
-  courses: readonly Course[];
-  term: Term | null;
-  /** 课表总开关：关掉后课连这张清单一起不出现（与月历/日视图同一口径） */
-  timetableOn: boolean;
 }
 
 /**
@@ -72,8 +76,7 @@ export interface MonthPlanInput {
  * 几天），而这张清单说的是"10 月的安排" —— 把 9 月 29 号列进 10 月清单里，
  * 翻到 9 月又会再列一次，同一天在两张清单上重复出现。
  *
- * 只有课的那天**也算有安排**：课是背景，但"这天空心点是哪几门课"
- * 恰恰是用户扫清单时最想知道的一件事。任务反而会被截断（见上面的注释）。
+ * 课不进这张清单（理由见文件头）；任务反而会被截断（见上面的注释）。
  */
 export function buildMonthPlan(input: MonthPlanInput): MonthPlanDay[] {
   const days: MonthPlanDay[] = [];
@@ -82,22 +85,17 @@ export function buildMonthPlan(input: MonthPlanInput): MonthPlanDay[] {
     if (!isSameMonth(day, input.month)) continue;
 
     const key = format(day, 'yyyy-MM-dd');
-    const courses =
-      input.timetableOn && input.term
-        ? coursesOnDate(input.courses, day, input.term)
-        : [];
     const exams = input.examsByDay.get(key) ?? [];
     const marks = input.marksByDay.get(key) ?? [];
     const allTasks = input.tasksByDay.get(key) ?? [];
     const tasks = allTasks.slice(0, MONTH_PLAN_TASK_LIMIT);
 
     // 什么都没有的日子不出现 —— 空行只会把真正的节奏稀释掉
-    if (!courses.length && !exams.length && !marks.length && !tasks.length) continue;
+    if (!exams.length && !marks.length && !tasks.length) continue;
 
     days.push({
       date: day,
       marks: [...marks],
-      courses,
       exams: [...exams],
       tasks: [...tasks],
       extraTasks: allTasks.length - tasks.length,

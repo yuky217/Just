@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  通知小图标（2026-10-13）。
+  通知栏的小图标会被系统当成**单色蒙版**（只认形状的 alpha），
+  所以这里全用白色填充、不给渐变也不给多色 —— 上了色也会被抹成一块白。
+  形状是一个铃铛（环 + 底下的坠子），与"提醒"这件事对得上。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,5 C8.134,5 5,8.134 5,12 C5,15.866 8.134,19 12,19 C15.866,19 19,15.866 19,12 C19,8.134 15.866,5 12,5 Z M12,7.6 C14.43,7.6 16.4,9.57 16.4,12 C16.4,14.43 14.43,16.4 12,16.4 C9.57,16.4 7.6,14.43 7.6,12 C7.6,9.57 9.57,7.6 12,7.6 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M10.6,19.2h2.8v2.6h-2.8z" />
+</vector>

@@ -58,3 +58,31 @@ describe('nextMarkDate：纪念日在日历上的落点', () => {
     expect(nextMarkDate(mark, NOW)).toBeNull();
   });
 });
+
+describe('nextMarkDate：农历 / 节气 倒数日往前滚', () => {
+  it('农历八月十五：今年已过 → 滚到明年', () => {
+    const mark = createMark({ title: '中秋', calendar: 'lunar', lunarMd: '8-15', date: '2026-09-25' });
+    expect(ymd(nextMarkDate(mark, NOW))).toBe('2027-09-15');
+  });
+
+  it('农历八月十五：今年还没到 → 落在今年', () => {
+    const early = new Date(2026, 1, 1, 12, 0); // 2026-02-01
+    const mark = createMark({ title: '中秋', calendar: 'lunar', lunarMd: '8-15', date: '2026-09-25' });
+    expect(ymd(nextMarkDate(mark, early))).toBe('2026-09-25');
+  });
+
+  it('节气清明：今年已过 → 滚到明年的清明', () => {
+    const mark = createMark({ title: '清明', calendar: 'term', term: '清明', date: '2026-04-05' });
+    expect(ymd(nextMarkDate(mark, NOW))).toBe('2027-04-05');
+  });
+
+  it('节气立冬：今年还没到 → 落在今年', () => {
+    const mark = createMark({ title: '立冬', calendar: 'term', term: '立冬', date: '2026-11-07' });
+    expect(ymd(nextMarkDate(mark, NOW))).toBe('2026-11-07');
+  });
+
+  it('闰二月初一：今年(2026)没有闰二月 → 滚到下一个闰二月年 2042', () => {
+    const mark = createMark({ title: '闰二', calendar: 'lunar', lunarMd: 'leap2-1', date: '2023-03-22' });
+    expect(ymd(nextMarkDate(mark, NOW))).toBe('2042-03-22');
+  });
+});

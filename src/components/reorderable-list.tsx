@@ -48,7 +48,7 @@ export interface ReorderableListProps<T> {
   keyOf: (item: T) => string;
   /** 浮层上显示什么（一般就是这行的标题） */
   labelOf: (item: T) => string;
-  renderItem: (item: T, index: number, dragging: boolean) => ReactNode;
+  renderItem: (item: T, index: number, dragging: boolean, nesting: boolean) => ReactNode;
   /**
    * 排序后回传新顺序。**`reorderable: false` 的列表不会调用它**，
    * 那种情况下可以不传。
@@ -67,10 +67,35 @@ export interface ReorderableListProps<T> {
    */
   reorderable?: boolean;
   /**
+   * 这一行**能不能被拖**（不给就默认全部能拖）。
+   *
+   * 与 `reorderable` 的区别：那是整档开关，这是**逐行**开关。
+   * 设置页排 Tab 顺序时用它把「首页」钉死 —— 那一行**连手势都不给**，
+   * 长按没有任何反馈。"拖不动"本身就是最清楚的说明，
+   * 比"抓起来了、松手又弹回去"强得多（后者看着像坏了）。
+   */
+  canMoveOf?: (item: T) => boolean;
+  /**
    * 长按后**原地松手**（没拖动）时回调 —— 用来弹一层菜单。
    * 传了它，长按就有了两种去向；不传则只有排序。
    */
   onLongPressIdle?: (item: T) => void;
+  /**
+   * 这一档**能不能把一条挂到另一条下**（拖拽变子任务）。默认 `false`。
+   *
+   * 与 `reorderable` **解耦**：不能排序的档（今天 / 往后 / 已过期）的先后是
+   * 算出来的，但"把一条归到另一条下面"仍是用户主动的、有意义的组织动作，
+   * 所以那些档也允许嵌套。
+   */
+  nestable?: boolean;
+  /**
+   * 拖拽中**悬停在某行中段足够久** → 把这一行挂到那行下面，回传
+   * （被拖的, 成为其父的那行）。不传则没有"变子任务"这一路。
+   *
+   * 落点判定（中段 40% = 嵌套、上下各 30% = 同级排序）与悬停计时都在手势层，
+   * 调方只在松手时拿到最终结果，不用关心中间的蓄力过程。
+   */
+  onNest?: (item: T, parentItem: T) => void;
   onDraggingChange?: (dragging: boolean) => void;
   /**
    * 外部投递区（**窗口坐标**的 y 范围）：手指拖进来就不再是排序，而是
@@ -126,6 +151,12 @@ const ZONE_HOVER_STEP = 10;
  */
 const ZONE_GHOST_OPACITY = 0.3;
 
+/** 落点判定：手指中心落在某行的哪一段。中段 40%（0.3–0.7）算"挂到这一行下面"，上下各 30% 算"同级插入"。 */
+const NEST_LO = 0.3;
+const NEST_HI = 0.7;
+/** 悬停在中段多久才算"确定要嵌套"：给一个蓄力时间，避免手指划过中段就误挂。 */
+const NEST_DWELL_MS = 450;
+
 /** 手指中心落在第几行 */
 function indexAtY(rows: RowBox[], y: number): number {
   if (!rows.length) return 0;
@@ -143,7 +174,10 @@ export function ReorderableList<T>({
   renderItem,
   onReorder,
   reorderable = true,
+  canMoveOf,
   onLongPressIdle,
+  nestable = false,
+  onNest,
   onDraggingChange,
   dropZone,
   onDropOutside,
@@ -156,6 +190,7 @@ export function ReorderableList<T>({
   const [rows, setRows] = useState<RowBox[]>([]);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const [targetIndex, setTargetIndex] = useState<number | null>(null);
+  const [nestIndex, setNestIndex] = useState<number | null>(null);
 
   /** 手势里读不到 JS state，所有"最新值"都放 ref */
   const itemsRef = useRef(items);
@@ -169,6 +204,9 @@ export function ReorderableList<T>({
   /** 能不能拖动排序。放进 ref 是为了不让手势对象依赖它而重建 */
   const reorderableRef = useRef(reorderable);
   reorderableRef.current = reorderable;
+  /** 逐行的"能不能拖"（同上，走 ref） */
+  const canMoveRef = useRef(canMoveOf);
+  canMoveRef.current = canMoveOf;
   const onLongPressIdleRef = useRef(onLongPressIdle);
   onLongPressIdleRef.current = onLongPressIdle;
   const onDraggingChangeRef = useRef(onDraggingChange);
@@ -179,6 +217,19 @@ export function ReorderableList<T>({
   onZoneHoverRef.current = onZoneHover;
   /** JS 侧的"此刻在不在落区里"，用来决定插入线还画不画、悬停回调要不要送 */
   const inZoneRef = useRef(false);
+
+  /** 嵌套相关：与排序解耦。nestable/onNest 走 ref，避免手势对象因它们重建 */
+  const nestableRef = useRef(nestable);
+  nestableRef.current = nestable;
+  const onNestRef = useRef(onNest);
+  onNestRef.current = onNest;
+  /** 当前正被高亮为"即将成为父任务"的那一行下标（null = 没在嵌套） */
+  const nestIndexRef = useRef<number | null>(null);
+  nestIndexRef.current = nestIndex;
+  /** 正在为哪一行蓄力（还没到 NEST_DWELL_MS） */
+  const nestCandidate = useRef<number | null>(null);
+  /** 蓄力计时器 */
+  const nestTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const dragY = useSharedValue(0);
   const ghostOpacity = useSharedValue(0);
@@ -206,24 +257,81 @@ export function ReorderableList<T>({
     });
   }, []);
 
+  /** 取消嵌套蓄力：清掉计时器、清掉高亮 */
+  const cancelNestDwell = useCallback(() => {
+    if (nestTimer.current) {
+      clearTimeout(nestTimer.current);
+      nestTimer.current = null;
+    }
+    if (nestCandidate.current !== null) {
+      nestCandidate.current = null;
+      if (nestIndexRef.current !== null) {
+        nestIndexRef.current = null;
+        setNestIndex(null);
+      }
+    }
+  }, []);
+
+  /** 进入某行中段：开始为这一行蓄力，够久就锁定为嵌套目标 */
+  const startNestDwell = useCallback(
+    (target: number) => {
+      if (nestCandidate.current === target) return; // 已经在为这一行计时
+      cancelNestDwell();
+      nestCandidate.current = target;
+      nestTimer.current = setTimeout(() => {
+        nestTimer.current = null;
+        nestCandidate.current = null;
+        nestIndexRef.current = target;
+        setNestIndex(target);
+        setTargetIndex(null); // 嵌套时收起同级插入线
+      }, NEST_DWELL_MS);
+    },
+    [cancelNestDwell],
+  );
+
   const begin = useCallback(
     (index: number) => {
       setActiveIndex(index);
       // 不能排序的档不画插入线：落点从头到尾就是它自己，画出来只是骗人
       setTargetIndex(reorderableRef.current ? index : null);
+      setNestIndex(null);
+      nestIndexRef.current = null;
+      cancelNestDwell();
       zoneGhost.value = 1;
       onDraggingChangeRef.current?.(true);
     },
-    [zoneGhost],
+    [zoneGhost, cancelNestDwell],
   );
 
-  const move = useCallback((index: number, dy: number) => {
-    if (!reorderableRef.current) return;
-    const rects = rowsRef.current;
-    const row = rects[index];
-    if (!row) return;
-    setTargetIndex(indexAtY(rects, row.y + dy + row.h / 2));
-  }, []);
+  const move = useCallback(
+    (index: number, dy: number) => {
+      const rects = rowsRef.current;
+      const row = rects[index];
+      if (!row) return;
+
+      // 嵌套：手指中心落在某行中段 → 为那一行蓄力，不画排序线
+      if (nestableRef.current) {
+        const y = row.y + dy + row.h / 2;
+        const target = indexAtY(rects, y);
+        const tRect = rects[target];
+        if (tRect && target !== index) {
+          const frac = (y - tRect.y) / tRect.h;
+          if (frac > NEST_LO && frac < NEST_HI) {
+            startNestDwell(target);
+            setTargetIndex(null);
+            return;
+          }
+        }
+        cancelNestDwell();
+      }
+
+      setNestIndex(null);
+      nestIndexRef.current = null;
+      if (!reorderableRef.current) return;
+      setTargetIndex(indexAtY(rects, row.y + dy + row.h / 2));
+    },
+    [startNestDwell, cancelNestDwell],
+  );
 
   /** 进/出落区：进了就收起插入线；出去时把格子高亮一起收掉 */
   const setZone = useCallback((next: boolean) => {
@@ -241,10 +349,13 @@ export function ReorderableList<T>({
   const finish = useCallback(() => {
     setActiveIndex(null);
     setTargetIndex(null);
+    setNestIndex(null);
+    nestIndexRef.current = null;
+    cancelNestDwell();
     inZoneRef.current = false;
     onZoneHoverRef.current?.(null);
     onDraggingChangeRef.current?.(false);
-  }, []);
+  }, [cancelNestDwell]);
 
   const commit = useCallback(
     (index: number, dy: number) => {
@@ -256,6 +367,9 @@ export function ReorderableList<T>({
       // 拖起来照样有浮层跟手，只是松手不改顺序，也不留插入线。
       if (!reorderableRef.current) return;
       if (!row || ids.length < 2) return;
+      // 钉死的行不该走到这里（手势都没给），留着是防"以后有人在别处触发 commit"
+      const item = itemsRef.current[index];
+      if (item !== undefined && canMoveRef.current && !canMoveRef.current(item)) return;
 
       const target = indexAtY(rects, row.y + dy + row.h / 2);
       if (target === index) return;
@@ -288,8 +402,14 @@ export function ReorderableList<T>({
   );
 
   const gestureFor = useCallback(
-    (index: number) =>
-      Gesture.Pan()
+    (index: number) => {
+      // 钉死的行（如 Tab 顺序里的「首页」）：给一个永不激活的手势，
+      // 长按既不会拾起、也不会跟手 —— 它就是不动，没有第二种解释
+      const item = itemsRef.current[index];
+      if (item !== undefined && canMoveRef.current && !canMoveRef.current(item)) {
+        return Gesture.Pan().enabled(false);
+      }
+      return Gesture.Pan()
         // 与月视图一致：长按先"拾起"，避免和单击、滚动抢。
         // 同一个常量（constants/gestures），两边手感不会各走各的
         .activateAfterLongPress(LONG_PRESS_PICKUP_MS)
@@ -351,6 +471,17 @@ export function ReorderableList<T>({
             runOnJS(idle)(index);
             return;
           }
+          // 嵌套：松手前已在某行中段悬停够久 → 挂到那一行下面
+          const nestAt = nestIndexRef.current;
+          if (nestAt !== null) {
+            const child = itemsRef.current[index];
+            const parent = itemsRef.current[nestAt];
+            runOnJS(finish)();
+            if (child !== undefined && parent !== undefined && onNestRef.current) {
+              runOnJS(onNestRef.current)(child, parent);
+            }
+            return;
+          }
           runOnJS(commit)(index, event.translationY);
         })
         .onFinalize(() => {
@@ -358,7 +489,8 @@ export function ReorderableList<T>({
           ghostOpacity.value = 0;
           inZone.value = 0;
           zoneGhost.value = 1;
-        }),
+        });
+    },
     [
       begin,
       commit,
@@ -401,6 +533,7 @@ export function ReorderableList<T>({
     <View>
       {items.map((item, index) => {
         const dragging = index === activeIndex;
+        const nesting = index === nestIndex;
         return (
           <View
             key={keyOf(item)}
@@ -413,10 +546,10 @@ export function ReorderableList<T>({
             ]}>
             {enabled ? (
               <GestureDetector gesture={gestures[index] ?? Gesture.Pan()}>
-                <View>{renderItem(item, index, dragging)}</View>
+                <View>{renderItem(item, index, dragging, nesting)}</View>
               </GestureDetector>
             ) : (
-              renderItem(item, index, false)
+              renderItem(item, index, false, false)
             )}
           </View>
         );

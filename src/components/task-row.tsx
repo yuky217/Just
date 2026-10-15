@@ -14,6 +14,7 @@ import { describeRepeat } from '@/domain/repeat-next';
 import { subtaskProgress } from '@/domain/subtask-progress';
 import { isAllDay, taskDue, type Task } from '@/domain/task';
 import { useTheme } from '@/hooks/use-theme';
+import { useHaptics } from '@/hooks/use-haptics';
 import { describeDue, formatDayTime } from '@/utils/datetime';
 
 /** 类型的中文短标签，界面上一律用它，不直接显示英文枚举 */
@@ -58,6 +59,20 @@ export interface TaskRowProps {
   selected?: boolean;
   /** 切换选中。只在 `selecting` 时由左侧控件与整行点击调用 */
   onToggleSelect?: (task: Task) => void;
+  /**
+   * 拖拽中，这一行正被悬停为"即将成为父任务"的高亮态。
+   * 显示：tint 底色 + 左侧 3px 强调条 + 行内「↳ 成为子任务」示意。
+   */
+  nesting?: boolean;
+  /**
+   * 行内「安排到哪天」（2026-10-15）。
+   *
+   * 这个动作原来挂在待办页"长按后原地松手"上 —— 长按改成**进多选**之后
+   * 必须给它找个新落点。做成行内一个按钮而不是再发明一个手势：
+   * 一个看得见的按钮，胜过一次没人知道的长按。
+   * 传了才显示（只有待办页传），其他用到 TaskRow 的地方不受影响。
+   */
+  onPickDay?: (task: Task) => void;
 }
 
 /** 展开器出现的门槛：两步以上。见 `children` 上的注释 */
@@ -76,8 +91,11 @@ export function TaskRow({
   selecting = false,
   selected = false,
   onToggleSelect,
+  nesting = false,
+  onPickDay,
 }: TaskRowProps) {
   const theme = useTheme();
+  const fireHaptic = useHaptics();
   const done = task.status === TaskStatus.Done;
   // 选择模式下整行点击 = 切换选中，不进详情；完成时那一侧的"完成圈"也藏起来
   const handleRowPress = () => {
@@ -116,7 +134,13 @@ export function TaskRow({
       style={({ pressed }) => [
         styles.row,
         {
-          backgroundColor: pressed ? theme.backgroundSelected : theme.backgroundElement,
+          backgroundColor: nesting
+            ? `${theme.tint}22`
+            : pressed
+              ? theme.backgroundSelected
+              : theme.backgroundElement,
+          borderLeftWidth: nesting ? 3 : 0,
+          borderLeftColor: nesting ? theme.tint : undefined,
         },
       ]}>
       {selecting ? (
@@ -141,7 +165,10 @@ export function TaskRow({
           accessibilityRole="checkbox"
           accessibilityState={{ checked: done }}
           accessibilityLabel={done ? '标记为未完成' : '标记为完成'}
-          onPress={() => onComplete?.(task)}
+          onPress={() => {
+            fireHaptic();
+            onComplete?.(task);
+          }}
           style={[
             styles.checkbox,
             {
@@ -228,6 +255,15 @@ export function TaskRow({
             {progress.done}/{progress.total}
           </ThemedText>
         ) : null}
+        {!selecting && onPickDay ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="安排到哪天"
+            hitSlop={6}
+            onPress={() => onPickDay(task)}>
+            <Ionicons name="calendar-outline" size={16} color={theme.textSecondary} />
+          </Pressable>
+        ) : null}
         {!selecting &&
           (onDelete ? (
             <Pressable
@@ -243,6 +279,14 @@ export function TaskRow({
           ) : null)}
         {trailing}
       </View>
+      {nesting ? (
+        <View style={[styles.nestHint, { backgroundColor: theme.tint }]} pointerEvents="none">
+          <Ionicons name="return-down-forward" size={12} color={theme.background} />
+          <ThemedText type="small" style={{ color: theme.background }}>
+            成为子任务
+          </ThemedText>
+        </View>
+      ) : null}
     </Pressable>
   );
 }
@@ -262,13 +306,17 @@ export function SubtaskRow({
   onToggle: (child: Task) => void;
 }) {
   const theme = useTheme();
+  const fireHaptic = useHaptics();
   const done = child.status === TaskStatus.Done;
   return (
     <Pressable
       accessibilityRole="checkbox"
       accessibilityState={{ checked: done }}
       accessibilityLabel={done ? '取消完成' : '标记为完成'}
-      onPress={() => onToggle(child)}
+      onPress={() => {
+        fireHaptic();
+        onToggle(child);
+      }}
       style={({ pressed }) => [
         styles.childRow,
         { backgroundColor: pressed ? theme.backgroundSelected : 'transparent' },
@@ -372,4 +420,19 @@ const styles = StyleSheet.create({
   meta: { fontSize: 12, lineHeight: 16 },
   metaMuted: { opacity: 0.6 },
   right: { alignItems: 'center', gap: Spacing.two, flexDirection: 'row' },
+  /**
+   * 拖拽嵌套时浮在行右上角的「成为子任务」示意。绝对定位 = 不撑高这一行，
+   * 否则拖拽中途行高变化会让已记录的 onLayout 坐标全部错位。
+   */
+  nestHint: {
+    position: 'absolute',
+    top: Spacing.one,
+    right: Spacing.three,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    paddingHorizontal: Spacing.two,
+    paddingVertical: 2,
+    borderRadius: Spacing.two,
+  },
 });

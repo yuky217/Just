@@ -1,17 +1,21 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useMemo, useState } from 'react';
-import { Pressable, StyleSheet, Switch, TextInput, View } from 'react-native';
+import { Alert, Pressable, StyleSheet, Switch, TextInput, View } from 'react-native';
 
 import { Card } from '@/components/card';
+import { ChoiceSheet, type ChoiceOption } from '@/components/choice-sheet';
 import { EmptyState } from '@/components/empty-state';
+import { LunarPicker } from '@/components/lunar-picker';
 import { MonthPicker } from '@/components/month-picker';
 import { Screen } from '@/components/screen';
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
-import type { Mark } from '@/domain/container';
+import type { CalendarKind, Mark } from '@/domain/container';
 import { MarkKind } from '@/domain/enums';
-import { describeMark, sortMarkViews } from '@/domain/marks';
+import { hasDuplicateTitle, describeMark, sortMarkViews } from '@/domain/marks';
+import { SOLAR_TERMS, markCalendarLabel } from '@/domain/lunar';
+import type { CreateMarkInput } from '@/domain/factory';
 import { useTheme } from '@/hooks/use-theme';
 import { useAppStore } from '@/state/app-store';
 import { dayKeyOf, parseDayKey } from '@/utils/datetime';
@@ -25,7 +29,21 @@ import { dayKeyOf, parseDayKey } from '@/utils/datetime';
  *
  * 一个细节：开了"每年重复"的倒数日会自动滚到下一次周年，
  * 所以生日、结婚纪念这类日子只需要录一次。
+ *
+ * 历法（第一批）：公历 / 农历 / 节气 三选一。
+ * - 公历：沿用原来的 MonthPicker；
+ * - 农历：月份滚轮 + 闰月开关 + 日滚轮 + 文本解析（见 LunarPicker）；
+ * - 节气：从 24 节气里挑一个（ChoiceSheet）。
+ * 农历 / 节气也照样存一个公历锚点（第一批不做日历上按历法显示，详见 working memory）。
  */
+const CALENDAR_CHIPS: { key: CalendarKind; label: string }[] = [
+  { key: 'solar', label: '公历' },
+  { key: 'lunar', label: '农历' },
+  { key: 'term', label: '节气' },
+];
+
+const TERM_OPTIONS: readonly ChoiceOption[] = SOLAR_TERMS.map((t) => ({ key: t, label: t }));
+
 export default function MarksScreen() {
   const theme = useTheme();
   const router = useRouter();
@@ -38,8 +56,13 @@ export default function MarksScreen() {
   const [creating, setCreating] = useState(false);
   const [draftTitle, setDraftTitle] = useState('');
   const [draftKind, setDraftKind] = useState<MarkKind>(MarkKind.Countdown);
+  const [draftCalendar, setDraftCalendar] = useState<CalendarKind>('solar');
   const [draftDate, setDraftDate] = useState<string | null>(null);
   const [draftDateEditing, setDraftDateEditing] = useState(false);
+  const [draftLunarMd, setDraftLunarMd] = useState<string | null>(null);
+  const [draftLunarEditing, setDraftLunarEditing] = useState(false);
+  const [draftTerm, setDraftTerm] = useState<string | null>(null);
+  const [termSheetVisible, setTermSheetVisible] = useState(false);
   const [draftYearly, setDraftYearly] = useState(false);
 
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -51,19 +74,73 @@ export default function MarksScreen() {
   const resetDraft = () => {
     setDraftTitle('');
     setDraftKind(MarkKind.Countdown);
+    setDraftCalendar('solar');
     setDraftDate(null);
+    setDraftLunarMd(null);
+    setDraftTerm(null);
     setDraftYearly(false);
     setDraftDateEditing(false);
+    setDraftLunarEditing(false);
+    setTermSheetVisible(false);
+  };
+
+  const pickCalendar = (next: CalendarKind) => {
+    setDraftCalendar(next);
+    // 切到农历 / 节气时给个默认，避免"选完历法却没选具体日子"的死胡同
+    if (next === 'lunar' && !draftLunarMd) setDraftLunarMd(`${new Date().getMonth() + 1}-1`);
+    if (next === 'term' && !draftTerm) setDraftTerm('清明');
+  };
+
+  const doCreate = async (base: CreateMarkInput) => {
+    await createMark(base);
+    resetDraft();
+    setCreating(false);
   };
 
   const submit = async () => {
     const title = draftTitle.trim();
-    const date = draftDate ?? dayKeyOf(new Date().toISOString());
-    if (!title || !date) return;
-    await createMark({ title, kind: draftKind, date, repeatYearly: draftYearly });
-    resetDraft();
-    setCreating(false);
+    if (!title) return;
+    const base: CreateMarkInput = { title, kind: draftKind, repeatYearly: draftYearly };
+
+    if (draftCalendar === 'solar') {
+      const date = draftDate ?? dayKeyOf(new Date().toISOString());
+      if (!date) return;
+      base.date = date;
+    } else if (draftCalendar === 'lunar') {
+      if (!draftLunarMd) return;
+      base.calendar = 'lunar';
+      base.lunarMd = draftLunarMd;
+    } else {
+      if (!draftTerm) return;
+      base.calendar = 'term';
+      base.term = draftTerm;
+    }
+
+    // 节气同名冲突：提示用户"已有同名，要不要合并？"
+    if (base.calendar === 'term' && hasDuplicateTitle(marks, title)) {
+      const existing = marks.find((m) => m.title.trim() === title);
+      Alert.alert('已有同名', `已经有一个叫「${title}」的纪念日了。\n要合并成一个，还是再建一个？`, [
+        { text: '取消', style: 'cancel' },
+        { text: '仍然创建', onPress: () => void doCreate(base) },
+        ...(existing
+          ? [
+              {
+                text: '去改那个',
+                onPress: () => {
+                  setCreating(false);
+                  setEditingId(existing.id);
+                },
+              },
+            ]
+          : []),
+      ]);
+      return;
+    }
+
+    await doCreate(base);
   };
+
+  const draftLabel = markCalendarLabel(draftCalendar, draftLunarMd, draftTerm, draftDate ?? '');
 
   return (
     <Screen
@@ -107,32 +184,94 @@ export default function MarksScreen() {
             />
           </View>
 
-          <Pressable
-            accessibilityRole="button"
-            onPress={() => setDraftDateEditing((value) => !value)}
-            style={({ pressed }) => [
-              styles.settingRow,
-              { backgroundColor: pressed ? theme.backgroundSelected : theme.backgroundElement },
-            ]}>
-            <Ionicons name="calendar-outline" size={16} color={theme.textSecondary} />
-            <ThemedText type="small">
-              {draftDate ? draftDate.replace(/-/g, '/') : '选一天'}
-            </ThemedText>
-            <Ionicons name="chevron-forward" size={14} color={theme.textSecondary} />
-          </Pressable>
-          {draftDateEditing ? (
-            <MonthPicker
-              value={draftDate}
-              onChange={(key) => setDraftDate(key)}
-              onDone={() => setDraftDateEditing(false)}
-            />
+          <View style={styles.chips}>
+            {CALENDAR_CHIPS.map((chip) => (
+              <Chip
+                key={chip.key}
+                label={chip.label}
+                active={draftCalendar === chip.key}
+                theme={theme}
+                onPress={() => pickCalendar(chip.key)}
+              />
+            ))}
+          </View>
+
+          {draftCalendar === 'solar' ? (
+            <>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => setDraftDateEditing((value) => !value)}
+                style={({ pressed }) => [
+                  styles.settingRow,
+                  { backgroundColor: pressed ? theme.backgroundSelected : theme.backgroundElement },
+                ]}>
+                <Ionicons name="calendar-outline" size={16} color={theme.textSecondary} />
+                <ThemedText type="small">{draftDate ? draftDate.replace(/-/g, '/') : '选一天'}</ThemedText>
+                <Ionicons name="chevron-forward" size={14} color={theme.textSecondary} />
+              </Pressable>
+              {draftDateEditing ? (
+                <MonthPicker
+                  value={draftDate}
+                  onChange={(key) => setDraftDate(key)}
+                  onDone={() => setDraftDateEditing(false)}
+                />
+              ) : null}
+            </>
+          ) : null}
+
+          {draftCalendar === 'lunar' ? (
+            <>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => setDraftLunarEditing((value) => !value)}
+                style={({ pressed }) => [
+                  styles.settingRow,
+                  { backgroundColor: pressed ? theme.backgroundSelected : theme.backgroundElement },
+                ]}>
+                <Ionicons name="moon-outline" size={16} color={theme.textSecondary} />
+                <ThemedText type="small">{draftLabel}</ThemedText>
+                <Ionicons name="chevron-forward" size={14} color={theme.textSecondary} />
+              </Pressable>
+              {draftLunarEditing ? (
+                <LunarPicker value={draftLunarMd} onChange={(md) => setDraftLunarMd(md)} />
+              ) : null}
+            </>
+          ) : null}
+
+          {draftCalendar === 'term' ? (
+            <>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => setTermSheetVisible(true)}
+                style={({ pressed }) => [
+                  styles.settingRow,
+                  { backgroundColor: pressed ? theme.backgroundSelected : theme.backgroundElement },
+                ]}>
+                <Ionicons name="leaf-outline" size={16} color={theme.textSecondary} />
+                <ThemedText type="small">{draftLabel || '选一个节气'}</ThemedText>
+                <Ionicons name="chevron-forward" size={14} color={theme.textSecondary} />
+              </Pressable>
+              <ChoiceSheet
+                visible={termSheetVisible}
+                title="选节气"
+                options={TERM_OPTIONS}
+                selectedKey={draftTerm ?? undefined}
+                onSelect={(key) => {
+                  setDraftTerm(key);
+                  setTermSheetVisible(false);
+                }}
+                onClose={() => setTermSheetVisible(false)}
+              />
+            </>
           ) : null}
 
           <View style={styles.switchRow}>
             <View style={styles.switchText}>
               <ThemedText type="smallBold">每年重复</ThemedText>
               <ThemedText type="small" themeColor="textSecondary" style={styles.footnote}>
-                生日、纪念日这类只需要录一次
+                {draftCalendar === 'lunar' || draftCalendar === 'term'
+                  ? '农历 / 节气本来每年就有，照常滚到下一次'
+                  : '生日、纪念日这类只需要录一次'}
               </ThemedText>
             </View>
             <Switch value={draftYearly} onValueChange={setDraftYearly} />
@@ -180,7 +319,12 @@ export default function MarksScreen() {
                       {view.mark.title}
                     </ThemedText>
                     <ThemedText type="small" themeColor="textSecondary" style={styles.footnote}>
-                      {view.mark.date.replace(/-/g, '/')}
+                      {markCalendarLabel(
+                        view.mark.calendar,
+                        view.mark.lunarMd,
+                        view.mark.term,
+                        view.mark.date,
+                      ).replace(/-/g, '/')}
                       {view.mark.repeatYearly ? ' · 每年' : ''}
                       {view.mark.kind === MarkKind.CountUp ? ' · 正数' : ' · 倒数'}
                     </ThemedText>
@@ -193,89 +337,15 @@ export default function MarksScreen() {
                 </Pressable>
 
                 {isEditing && editing ? (
-                  <Card>
-                    <TextInput
-                      defaultValue={editing.title}
-                      onEndEditing={(e) => {
-                        const next = e.nativeEvent.text.trim();
-                        if (next && next !== editing.title) void updateMark(editing.id, { title: next });
-                      }}
-                      placeholder="是什么日子"
-                      placeholderTextColor={theme.textSecondary}
-                      style={[
-                        styles.input,
-                        {
-                          color: theme.text,
-                          backgroundColor: theme.background,
-                          borderColor: theme.backgroundSelected,
-                        },
-                      ]}
-                    />
-
-                    <View style={styles.chips}>
-                      <Chip
-                        label="还剩几天"
-                        active={editing.kind === MarkKind.Countdown}
-                        theme={theme}
-                        onPress={() => void updateMark(editing.id, { kind: MarkKind.Countdown })}
-                      />
-                      <Chip
-                        label="已经多少天"
-                        active={editing.kind === MarkKind.CountUp}
-                        theme={theme}
-                        onPress={() => void updateMark(editing.id, { kind: MarkKind.CountUp })}
-                      />
-                    </View>
-
-                    <Pressable
-                      accessibilityRole="button"
-                      onPress={() => setEditingDate((value) => !value)}
-                      style={({ pressed }) => [
-                        styles.settingRow,
-                        { backgroundColor: pressed ? theme.backgroundSelected : theme.backgroundElement },
-                      ]}>
-                      <Ionicons name="calendar-outline" size={16} color={theme.textSecondary} />
-                      <ThemedText type="small">{editing.date.replace(/-/g, '/')}</ThemedText>
-                      <Ionicons name="chevron-forward" size={14} color={theme.textSecondary} />
-                    </Pressable>
-                    {editingDate ? (
-                      <MonthPicker
-                        value={editing.date}
-                        onChange={(key) => {
-                          if (key) void updateMark(editing.id, { date: key });
-                        }}
-                        onDone={() => setEditingDate(false)}
-                      />
-                    ) : null}
-
-                    <View style={styles.switchRow}>
-                      <View style={styles.switchText}>
-                        <ThemedText type="smallBold">每年重复</ThemedText>
-                        <ThemedText type="small" themeColor="textSecondary" style={styles.footnote}>
-                          倒数日会自动滚到下一次周年
-                        </ThemedText>
-                      </View>
-                      <Switch
-                        value={editing.repeatYearly}
-                        onValueChange={(value) => void updateMark(editing.id, { repeatYearly: value })}
-                      />
-                    </View>
-
-                    <Pressable
-                      accessibilityRole="button"
-                      onPress={async () => {
-                        await removeMark(editing.id);
-                        setEditingId(null);
-                      }}
-                      style={({ pressed }) => [
-                        styles.danger,
-                        { borderColor: theme.backgroundSelected, opacity: pressed ? 0.6 : 1 },
-                      ]}>
-                      <ThemedText type="small" themeColor="textSecondary">
-                        删除这个纪念日
-                      </ThemedText>
-                    </Pressable>
-                  </Card>
+                  <EditCard
+                    mark={editing}
+                    theme={theme}
+                    onUpdate={(patch) => void updateMark(editing.id, patch)}
+                    onRemove={async () => {
+                      await removeMark(editing.id);
+                      setEditingId(null);
+                    }}
+                  />
                 ) : null}
               </View>
             );
@@ -305,6 +375,174 @@ export default function MarksScreen() {
         </ThemedText>
       </Pressable>
     </Screen>
+  );
+}
+
+/** 单个纪念日的编辑卡（展开态） */
+function EditCard({
+  mark,
+  theme,
+  onUpdate,
+  onRemove,
+}: {
+  mark: Mark;
+  theme: ReturnType<typeof useTheme>;
+  onUpdate: (patch: Partial<Mark>) => void;
+  onRemove: () => void;
+}) {
+  const [editingDate, setEditingDate] = useState(false);
+  const [lunarEditing, setLunarEditing] = useState(false);
+  const [termSheetVisible, setTermSheetVisible] = useState(false);
+
+  const calendar = mark.calendar ?? 'solar';
+  const label = markCalendarLabel(mark.calendar, mark.lunarMd, mark.term, mark.date);
+
+  return (
+    <Card>
+      <TextInput
+        defaultValue={mark.title}
+        onEndEditing={(e) => {
+          const next = e.nativeEvent.text.trim();
+          if (next && next !== mark.title) onUpdate({ title: next });
+        }}
+        placeholder="是什么日子"
+        placeholderTextColor={theme.textSecondary}
+        style={[
+          styles.input,
+          {
+            color: theme.text,
+            backgroundColor: theme.background,
+            borderColor: theme.backgroundSelected,
+          },
+        ]}
+      />
+
+      <View style={styles.chips}>
+        <Chip
+          label="还剩几天"
+          active={mark.kind === MarkKind.Countdown}
+          theme={theme}
+          onPress={() => onUpdate({ kind: MarkKind.Countdown })}
+        />
+        <Chip
+          label="已经多少天"
+          active={mark.kind === MarkKind.CountUp}
+          theme={theme}
+          onPress={() => onUpdate({ kind: MarkKind.CountUp })}
+        />
+      </View>
+
+      <View style={styles.chips}>
+        {CALENDAR_CHIPS.map((chip) => (
+          <Chip
+            key={chip.key}
+            label={chip.label}
+            active={calendar === chip.key}
+            theme={theme}
+            onPress={() => onUpdate({ calendar: chip.key })}
+          />
+        ))}
+      </View>
+
+      {calendar === 'solar' ? (
+        <>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => setEditingDate((value) => !value)}
+            style={({ pressed }) => [
+              styles.settingRow,
+              { backgroundColor: pressed ? theme.backgroundSelected : theme.backgroundElement },
+            ]}>
+            <Ionicons name="calendar-outline" size={16} color={theme.textSecondary} />
+            <ThemedText type="small">{mark.date.replace(/-/g, '/')}</ThemedText>
+            <Ionicons name="chevron-forward" size={14} color={theme.textSecondary} />
+          </Pressable>
+          {editingDate ? (
+            <MonthPicker
+              value={mark.date}
+              onChange={(key) => {
+                if (key) onUpdate({ date: key });
+              }}
+              onDone={() => setEditingDate(false)}
+            />
+          ) : null}
+        </>
+      ) : null}
+
+      {calendar === 'lunar' ? (
+        <>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => setLunarEditing((value) => !value)}
+            style={({ pressed }) => [
+              styles.settingRow,
+              { backgroundColor: pressed ? theme.backgroundSelected : theme.backgroundElement },
+            ]}>
+            <Ionicons name="moon-outline" size={16} color={theme.textSecondary} />
+            <ThemedText type="small">{label}</ThemedText>
+            <Ionicons name="chevron-forward" size={14} color={theme.textSecondary} />
+          </Pressable>
+          {lunarEditing ? (
+            <LunarPicker
+              value={mark.lunarMd ?? null}
+              onChange={(md) => onUpdate({ lunarMd: md, calendar: 'lunar' })}
+            />
+          ) : null}
+        </>
+      ) : null}
+
+      {calendar === 'term' ? (
+        <>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => setTermSheetVisible(true)}
+            style={({ pressed }) => [
+              styles.settingRow,
+              { backgroundColor: pressed ? theme.backgroundSelected : theme.backgroundElement },
+            ]}>
+            <Ionicons name="leaf-outline" size={16} color={theme.textSecondary} />
+            <ThemedText type="small">{label || '选一个节气'}</ThemedText>
+            <Ionicons name="chevron-forward" size={14} color={theme.textSecondary} />
+          </Pressable>
+          <ChoiceSheet
+            visible={termSheetVisible}
+            title="选节气"
+            options={TERM_OPTIONS}
+            selectedKey={mark.term ?? undefined}
+            onSelect={(key) => {
+              onUpdate({ term: key, calendar: 'term' });
+              setTermSheetVisible(false);
+            }}
+            onClose={() => setTermSheetVisible(false)}
+          />
+        </>
+      ) : null}
+
+      <View style={styles.switchRow}>
+        <View style={styles.switchText}>
+          <ThemedText type="smallBold">每年重复</ThemedText>
+          <ThemedText type="small" themeColor="textSecondary" style={styles.footnote}>
+            倒数日会自动滚到下一次周年
+          </ThemedText>
+        </View>
+        <Switch
+          value={mark.repeatYearly}
+          onValueChange={(value) => onUpdate({ repeatYearly: value })}
+        />
+      </View>
+
+      <Pressable
+        accessibilityRole="button"
+        onPress={onRemove}
+        style={({ pressed }) => [
+          styles.danger,
+          { borderColor: theme.backgroundSelected, opacity: pressed ? 0.6 : 1 },
+        ]}>
+        <ThemedText type="small" themeColor="textSecondary">
+          删除这个纪念日
+        </ThemedText>
+      </Pressable>
+    </Card>
   );
 }
 

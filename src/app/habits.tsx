@@ -32,9 +32,12 @@ import {
   type HabitCadence,
 } from '@/domain/habit-convert';
 import { CompletionRule } from '@/domain/enums';
+import { isCheckinOn } from '@/domain/features';
 import type { Task } from '@/domain/task';
 import { useTheme } from '@/hooks/use-theme';
+import { useHaptics } from '@/hooks/use-haptics';
 import { useAppStore } from '@/state/app-store';
+import { useSettings } from '@/state/settings-store';
 
 /**
  * 习惯打卡。
@@ -64,6 +67,7 @@ const HEATMAP_WEEKS = 10;
 export default function HabitsScreen() {
   const router = useRouter();
   const theme = useTheme();
+  const fireHaptic = useHaptics();
   const params = useLocalSearchParams<{ new?: string | string[] }>();
   const rawNew = params.new;
   const startCreating = (Array.isArray(rawNew) ? rawNew[0] : rawNew) === '1';
@@ -76,6 +80,15 @@ export default function HabitsScreen() {
   const loadTask = useAppStore((state) => state.loadTask);
   const updateTask = useAppStore((state) => state.updateTask);
   const [busyId, setBusyId] = useState<string | null>(null);
+
+  /**
+   * 「打卡」关掉：这一页变成一张**纯习惯清单**（点一行进详情页改它），
+   * 打卡按钮、热力图、"连续几天"这些**打卡的痕迹**全部收起来。
+   * 习惯本身还在 —— 关掉的是一个动作，不是这一类事。
+   */
+  const checkinOn = isCheckinOn(
+    useSettings((state) => state.features),
+  );
 
   /*
     新建习惯：一个输入框 + 一组节奏。默认值是「每天 1 次」——
@@ -159,6 +172,7 @@ export default function HabitsScreen() {
   const doneCount = stats.filter((s) => s.doneToday).length;
 
   const toggle = async (habit: Task, doneToday: boolean) => {
+    fireHaptic();
     setBusyId(habit.id);
     try {
       if (doneToday) await undoCheckIn(habit.id);
@@ -172,7 +186,9 @@ export default function HabitsScreen() {
     <Screen
       title="习惯"
       subtitle={
-        habits.length ? `今天已打卡 ${doneCount}/${habits.length}` : '一次一次累积出来的东西'
+        checkinOn && habits.length
+          ? `今天已打卡 ${doneCount}/${habits.length}`
+          : '一次一次累积出来的东西'
       }
       right={
         <View style={styles.headerActions}>
@@ -210,13 +226,17 @@ export default function HabitsScreen() {
               <ThemedText type="smallBold" numberOfLines={1}>
                 {habit.title}
               </ThemedText>
-              <ThemedText type="small" themeColor="textSecondary">
-                {describeStreak(streak)}
-                {streak.longest > 0 ? ` · 最长 ${streak.longest} 天` : ''}
-                {` · 共 ${streak.total} 次`}
-              </ThemedText>
+              {/* 连续天数 / 共几次都是打卡算出来的；不打卡时这一行没有东西可说 */}
+              {checkinOn ? (
+                <ThemedText type="small" themeColor="textSecondary">
+                  {describeStreak(streak)}
+                  {streak.longest > 0 ? ` · 最长 ${streak.longest} 天` : ''}
+                  {` · 共 ${streak.total} 次`}
+                </ThemedText>
+              ) : null}
             </Pressable>
 
+            {checkinOn ? (
             <Pressable
               accessibilityRole="button"
               accessibilityState={{ checked: doneToday }}
@@ -242,6 +262,7 @@ export default function HabitsScreen() {
                 {doneToday ? '今天已打卡' : '今天打卡'}
               </ThemedText>
             </Pressable>
+            ) : null}
           </View>
 
           {describeProgress(habit, periodCount) ? (
@@ -250,14 +271,19 @@ export default function HabitsScreen() {
             </ThemedText>
           ) : null}
 
-          <CheckinHeatmap
-            cells={buildHeatmap(keys, HEATMAP_DAYS, today)}
-            weeks={HEATMAP_WEEKS}
-          />
+          {/* 热力图整张都是打卡痕迹，关掉打卡它就没有内容了 */}
+          {checkinOn ? (
+            <>
+              <CheckinHeatmap
+                cells={buildHeatmap(keys, HEATMAP_DAYS, today)}
+                weeks={HEATMAP_WEEKS}
+              />
 
-          <ThemedText type="small" themeColor="textSecondary" style={styles.legend}>
-            最近 {HEATMAP_DAYS} 天，深色 = 打过卡
-          </ThemedText>
+              <ThemedText type="small" themeColor="textSecondary" style={styles.legend}>
+                最近 {HEATMAP_DAYS} 天，深色 = 打过卡
+              </ThemedText>
+            </>
+          ) : null}
         </Card>
       ))}
 

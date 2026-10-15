@@ -43,7 +43,7 @@ export function Card({ title, hint, right, children, style, bare }: CardProps) {
           <View style={styles.headerText}>
             {title ? <ThemedText type="smallBold">{title}</ThemedText> : null}
             {showHint ? (
-              <ThemedText type="small" themeColor="textSecondary" style={styles.hint}>
+              <ThemedText type="caption" themeColor="textSecondary">
                 {hint}
               </ThemedText>
             ) : null}
@@ -66,6 +66,5 @@ const styles = StyleSheet.create({
   bare: { paddingHorizontal: 0, paddingVertical: 0, borderRadius: 0 },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: Spacing.two },
   headerText: { flex: 1, gap: Spacing.half },
-  hint: { fontSize: 12, lineHeight: 16 },
   body: { gap: Spacing.two },
 });

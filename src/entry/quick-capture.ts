@@ -3,6 +3,7 @@ import { taskRepository } from '@/data/repositories/task-repository';
 import { CaptureSource } from '@/domain/enums';
 import type { TaskKind } from '@/domain/enums';
 import { createIdea, createTask } from '@/domain/factory';
+import type { FeatureFlags } from '@/domain/features';
 import { parseIdeaTags } from '@/domain/idea';
 import { decideRoute, type CaptureRoute } from '@/domain/routing';
 import { parseSchedule, type ParsedSchedule } from '@/domain/parse-schedule';
@@ -47,6 +48,14 @@ export interface QuickCaptureInput {
   reminderMinutesBefore?: number | null;
   /** 覆盖自动分流的类型（用户明确指定"这是习惯"） */
   kind?: TaskKind;
+  /**
+   * 功能开关（不传 = 全开）。
+   *
+   * 分流**必须**看它：想法库关了还把"我有个想法"判成想法，这条记录就落进
+   * 一个用户看不见的格子 —— 记完了找不到，比记错了更让人怀疑这个 App。
+   * 关掉的功能不该被自动分流送进去，这是"优雅降级"里最容易漏的一条。
+   */
+  features?: FeatureFlags;
 }
 
 export interface QuickCaptureResult {
@@ -87,11 +96,14 @@ export async function quickCapture(input: QuickCaptureInput): Promise<QuickCaptu
    */
   const repeat = input.repeat ?? parsed.repeat ?? null;
 
-  const decision = decideRoute({
-    text: displayText,
-    time,
-    markedAsInspiration: input.markedAsInspiration,
-  });
+  const decision = decideRoute(
+    {
+      text: displayText,
+      time,
+      markedAsInspiration: input.markedAsInspiration,
+    },
+    input.features,
+  );
 
   // 【灵感】→ 想法库：不提醒、不催办
   if (decision.route === 'idea') {

@@ -86,6 +86,14 @@ export interface Task extends BaseEntity {
    * 而那一眼不该靠点进详情页才能看见。
    */
   location?: string | null;
+  /**
+   * 链接（可选）：这件事对应的网页 —— 报名页、文档、聊天里转发的那条。
+   *
+   * 它是单独一个字段而不是塞进备注，因为**备注是给人读的，链接是要能点开的**：
+   * 塞在备注里就永远只能手动复制，而"点一下就打开"才是手机上真正会用的动作。
+   * 与 location 同级的选填一等字段，跟着任务一起读出来。
+   */
+  url?: string | null;
   kind: TaskKind;
   status: TaskStatus;
   time: TaskTime;

@@ -1,16 +1,10 @@
 import { useCallback, useEffect, useRef } from 'react';
-import {
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  View,
-  type NativeScrollEvent,
-  type NativeSyntheticEvent,
-} from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { Wheel, WHEEL_ITEM_HEIGHT } from '@/components/wheel';
 
 /**
  * 时 / 分双滚轮。
@@ -29,7 +23,7 @@ import { useTheme } from '@/hooks/use-theme';
  *    四层防备（nestedScrollEnabled、外层滚动锁、自动解锁、结算容差）之后，
  *    真机上仍有"轮子滚不动"的报告。不再赌第五层手势修复：每一行数字
  *    **可以直接点选**（点谁选谁，iOS 滚轮的同款行为）—— 这条路不经过
- *    任何滚动冲突，在所有设备上必然可用。滚动只是加速，不是唯一入口。
+ *     任何滚动冲突，在所有设备上必然可用。滚动只是加速，不是唯一入口。
  *
  * 1. **竖直 ScrollView 套竖直 ScrollView，内层滚不动。**
  *    滚轮的每个使用点（自定义时间面板、安排面板）都把它放在另一个竖直
@@ -46,21 +40,12 @@ import { useTheme } from '@/hooks/use-theme';
  * 3. **没滚过半格时不吸附。** 拖一点点松手，轮子会停在两个刻度之间。现在结算时
  *    发现离原位不到一格就吸回去；`Math.abs(...) > 1` 这个容差是必须的 ——
  *    否则 scrollTo 触发 onScroll、onScroll 又触发吸附，会变成死循环。
+ *
+ * 滚轮的通用实现已抽到 `components/wheel.tsx`，这里只负责"时 + 分"两列的组合
+ * 与外层滚动锁的联动（详见该文件）。
  */
 
-const ITEM_HEIGHT = 36;
-/** 可见行数（奇数，中间那行是选中项） */
-const VISIBLE_ROWS = 5;
-const WHEEL_HEIGHT = ITEM_HEIGHT * VISIBLE_ROWS;
-/** 上下留白：让首/末项也能滚到正中间 */
-const PAD = (WHEEL_HEIGHT - ITEM_HEIGHT) / 2;
-
-/**
- * 按住轮子后多久自动解锁外层滚动。
- * 为什么要有这个兜底：`onTouchEnd` 只在手指抬起时送到**触摸起点所在的那个 View**，
- * 手指滑出轮子才松开时不一定送得到。没有这道保险，外层滚动会被永久关掉 ——
- * 那是比"轮子滚不动"更糟的 bug。拖动期间每次 onScroll 都会把这个窗口续上。
- */
+/** 按住滚轮后多久自动解锁外层滚动（详见第 0/1 条）。 */
 const SCROLL_LOCK_MS = 700;
 
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
@@ -156,143 +141,13 @@ export function TimeWheel({ minutesOfDay, onChange, onScrollLockChange }: TimeWh
   );
 }
 
-interface WheelProps {
-  values: number[];
-  index: number;
-  onIndexChange: (value: number) => void;
-  format: (value: number) => string;
-  accessibilityLabel: string;
-  /** 轮子在滚（含动量）—— 用来把外层滚动的锁续期 */
-  onActivity: () => void;
-}
-
-function Wheel({
-  values,
-  index,
-  onIndexChange,
-  format,
-  accessibilityLabel,
-  onActivity,
-}: WheelProps) {
-  const theme = useTheme();
-  const ref = useRef<ScrollView>(null);
-  /** 我们自己滚出来的下标 —— 用来区分"外部改了值"和"用户滚轮子" */
-  const reported = useRef(index);
-  const settle = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** 首次挂载要定位到当前值，但不能带动画（别让用户看见它从 00 滚过去） */
-  const firstRun = useRef(true);
-
-  const scrollToIndex = useCallback((value: number, animated: boolean) => {
-    ref.current?.scrollTo({ y: value * ITEM_HEIGHT, animated });
-  }, []);
-
-  /**
-   * 定位：挂载时到当前值；外部改值（点快捷分、切预设）时跟过去。
-   * 用户自己滚出来的不重复滚，否则会和惯性打架。
-   */
-  useEffect(() => {
-    const isFirst = firstRun.current;
-    firstRun.current = false;
-    if (!isFirst && reported.current === index) return;
-
-    reported.current = index;
-    scrollToIndex(index, !isFirst);
-
-    if (isFirst) {
-      // Android 上挂载当帧布局可能还没完成，这时 scrollTo 会被丢掉 → 下一帧补一次
-      const timer = setTimeout(() => scrollToIndex(index, false), 32);
-      return () => clearTimeout(timer);
-    }
-  }, [index, scrollToIndex]);
-
-  useEffect(
-    () => () => {
-      if (settle.current) clearTimeout(settle.current);
-    },
-    [],
-  );
-
-  /**
-   * 结算：把"滚到哪儿了"换算成下标。
-   *
-   * 只挂一个入口（滚动停止 120ms 后结算）：**不挂 `onScrollEndDrag`** ——
-   * 那一刻动量还没跑完，拿着半路的位置去对齐会把轮子停在用户没想选的地方
-   * （横向的专注选择器踩过同一个坑）。Web 端没有 momentum 事件，
-   * 这个 120ms 防抖正好把它一起覆盖了。
-   */
-  const settleAt = useCallback(
-    (offsetY: number) => {
-      const raw = Math.round(offsetY / ITEM_HEIGHT);
-      const next = values[Math.max(0, Math.min(values.length - 1, raw))];
-      if (next === undefined) return;
-
-      if (next === index) {
-        // 没滚过半格：吸回原位。容差 1px 是为了不把自己滚出来的 onScroll 再触发一次
-        if (Math.abs(offsetY - index * ITEM_HEIGHT) > 1) scrollToIndex(index, true);
-        return;
-      }
-      reported.current = next;
-      onIndexChange(next);
-      // 兜一下 Web（那边的吸附不总生效）；原生端本来就已经吸附到位，等于空转
-      scrollToIndex(next, true);
-    },
-    [index, onIndexChange, scrollToIndex, values],
-  );
-
-  const handleScroll = useCallback(
-    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-      onActivity();
-      const offsetY = event.nativeEvent.contentOffset.y;
-      if (settle.current) clearTimeout(settle.current);
-      settle.current = setTimeout(() => settleAt(offsetY), 120);
-    },
-    [onActivity, settleAt],
-  );
-
-  return (
-    <ScrollView
-      ref={ref}
-      accessibilityLabel={accessibilityLabel}
-      showsVerticalScrollIndicator={false}
-      // Android：允许在另一个 ScrollView 里自己滚（否则外层会把手势全吃掉）
-      nestedScrollEnabled
-      snapToInterval={ITEM_HEIGHT}
-      decelerationRate="fast"
-      scrollEventThrottle={16}
-      contentContainerStyle={styles.wheelContent}
-      onScroll={handleScroll}
-      style={styles.wheel}>
-      {values.map((value) => {
-        const active = value === index;
-        return (
-          <Pressable
-            key={value}
-            accessibilityRole="button"
-            accessibilityLabel={format(value)}
-            // 点谁选谁：滚动手势的保底通道（见文件头第 0 条）。
-            // 只在值确实变了时走 onChange，避免点中选行触发多余的父级重渲染。
-            onPress={() => {
-              if (value === index) return;
-              reported.current = value;
-              onIndexChange(value);
-              scrollToIndex(value, true);
-            }}
-            style={styles.item}>
-            <ThemedText
-              type={active ? 'smallBold' : 'small'}
-              themeColor={active ? 'text' : 'textSecondary'}
-              style={[styles.itemText, !active && styles.itemIdle]}>
-              {format(value)}
-            </ThemedText>
-          </Pressable>
-        );
-      })}
-    </ScrollView>
-  );
-}
-
 const styles = StyleSheet.create({
-  row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: WHEEL_ITEM_HEIGHT * 5,
+  },
   bandWrap: {
     position: 'absolute',
     top: 0,
@@ -303,10 +158,5 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   bandLine: { width: '72%', height: StyleSheet.hairlineWidth },
-  wheel: { height: WHEEL_HEIGHT, flexGrow: 0, width: 76 },
-  wheelContent: { paddingVertical: PAD },
-  item: { height: ITEM_HEIGHT, alignItems: 'center', justifyContent: 'center' },
-  itemText: { fontSize: 20, lineHeight: 26 },
-  itemIdle: { fontSize: 16, opacity: 0.55 },
   colon: { fontSize: 20, lineHeight: 26, paddingBottom: Spacing.one },
 });

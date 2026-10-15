@@ -1,5 +1,6 @@
 import { TimeAttribute } from './enums';
 import type { TaskKind } from './enums';
+import type { FeatureFlags } from './features';
 import type { TaskTime } from './task';
 
 /**
@@ -27,8 +28,15 @@ export interface RouteDecision {
   reason: string;
 }
 
-export function decideRoute(draft: CaptureDraft): RouteDecision {
-  if (draft.markedAsInspiration) {
+/**
+ * @param flags 功能开关。**关掉的功能不会被"自动分流"送进去** ——
+ *   想法库关了还把"我有个想法"判成想法，用户就会记完找不到（它落在一个
+ *   看不见的格子里）。宁可落成一条普通待办，也不能造出看不见的东西。
+ */
+export function decideRoute(draft: CaptureDraft, flags?: FeatureFlags): RouteDecision {
+  // 想法库关了：这一格没有"家"，勾了灵感也照样进待办（界面上那个勾也已经不出现，
+  // 这里是给深链 / 语音这些没有界面的入口兜底）
+  if (draft.markedAsInspiration && (flags?.ideas ?? true)) {
     return { route: 'idea', kind: 'idea', reason: '标记为灵感 → 想法库' };
   }
 
@@ -36,7 +44,7 @@ export function decideRoute(draft: CaptureDraft): RouteDecision {
   if (!time || time.attribute === TimeAttribute.None) {
     return {
       route: 'inbox',
-      kind: inferKind(draft.text),
+      kind: inferKind(draft.text, flags),
       reason: '没有明确时间 → 待办（等你安排）',
     };
   }
@@ -54,11 +62,15 @@ export function decideRoute(draft: CaptureDraft): RouteDecision {
  * 骨架阶段用最朴素的启发式，够用就行；
  * 真正的"理解"是能力层的事（主文档 3.1），能力关闭时这段启发式就是降级方案。
  */
-function inferKind(text: string): TaskKind {
+function inferKind(text: string, flags?: FeatureFlags): TaskKind {
   const t = text.trim();
   if (!t) return 'execution';
-  if (/(每周|每天|每月|每日|隔天|每周\d次|习惯)/.test(t)) return 'habit';
-  if (/(跑步|健身|背单词|阅读|冥想|练琴|打卡|喝\d*杯水)/.test(t)) return 'habit';
-  if (/(灵感|想法|点子|也许|要不要|考虑)/.test(t)) return 'idea';
+  // 习惯关了就不再判成习惯：造出一条"习惯"用户却看不见（习惯页、首页那行都没了），
+  // 它只会静静地躺在待办里，带着一个解释不通的类型
+  if (flags?.habits ?? true) {
+    if (/(每周|每天|每月|每日|隔天|每周\d次|习惯)/.test(t)) return 'habit';
+    if (/(跑步|健身|背单词|阅读|冥想|练琴|打卡|喝\d*杯水)/.test(t)) return 'habit';
+  }
+  if ((flags?.ideas ?? true) && /(灵感|想法|点子|也许|要不要|考虑)/.test(t)) return 'idea';
   return 'execution';
 }

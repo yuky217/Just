@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { Alert, Linking, Pressable, StyleSheet, TextInput, View } from 'react-native';
 
 import { BreakdownSheet } from '@/components/breakdown-sheet';
 import { Card } from '@/components/card';
@@ -42,10 +42,13 @@ import { buildScheduleTime, SCHEDULE_PRESETS } from '@/domain/schedule-presets';
 import { subtaskProgress, undoableBreakdown } from '@/domain/subtask-progress';
 import { taskDisplayState } from '@/domain/task-state';
 import { taskAnchor, isAllDay, type RepeatRule, type Task, type TaskTime } from '@/domain/task';
+import { normalizeUrl } from '@/domain/url';
 import { isCapabilityReady, suggestBreakdown } from '@/capabilities/client';
 import { AiCapability } from '@/capabilities/types';
 import { useTheme } from '@/hooks/use-theme';
+import { useHaptics } from '@/hooks/use-haptics';
 import { useAppStore } from '@/state/app-store';
+import { isCheckinOn } from '@/domain/features';
 import { selectCapabilityGate, useSettings } from '@/state/settings-store';
 import { describeDue, formatDayTime } from '@/utils/datetime';
 
@@ -87,6 +90,7 @@ export default function TaskDetailScreen() {
   const params = useLocalSearchParams<{ id?: string | string[] }>();
   const router = useRouter();
   const theme = useTheme();
+  const fireHaptic = useHaptics();
 
   const rawId = params.id;
   const id = Array.isArray(rawId) ? rawId[0] : rawId;
@@ -118,6 +122,19 @@ export default function TaskDetailScreen() {
   const gate = useSettings(selectCapabilityGate);
   const canAiBreakdown = isCapabilityReady(gate, AiCapability.Breakdown);
 
+  /*
+   * 功能开关：这一页是"一件事的全部设置"，所以关掉的功能在这里
+   * 各有各的表现 ——
+   *   习惯关了：类型里没有「习惯」这一项、也没有「转为习惯」这张卡
+   *     （但**已经**是习惯的任务照旧显示，数据不动，只是不能再把它变成习惯）；
+   *   打卡关了：底栏那颗主按钮退回"标记完成"，目标卡里也不再有「今天打卡」；
+   *   项目关了：整张「归属」卡收起（它的列表页也没了，留着就是指向空气的 chip）。
+   */
+  const features = useSettings((state) => state.features);
+  const habitsOn = features.habits ?? true;
+  const checkinOn = isCheckinOn(features);
+  const projectsOn = features.projects ?? true;
+
   const [task, setTask] = useState<Task | null>(null);
   /**
    * 动作完成后留一句回声（"已转为习惯""已挪到明天 14:00"）——
@@ -144,6 +161,14 @@ export default function TaskDetailScreen() {
   const isFrequency = task?.completion === CompletionRule.Frequency;
   const periodCount =
     task && isFrequency ? occurrencesInPeriod(checkinKeys, task.repeat) : 0;
+  /**
+   * 底栏主按钮是不是"打卡"。
+   *
+   * 频率型（习惯）本来就该按"今天做没做"来记，所以主按钮是打卡；
+   * 但**打卡这个功能关掉时它必须退回"标记完成"** —— 这条任务仍然做得完，
+   * 只是不再记今天。让按钮留在"打卡"上，等于给了一个通往已关功能的入口。
+   */
+  const primaryIsCheckin = checkinOn && isFrequency;
   const [subtasks, setSubtasks] = useState<Task[]>([]);
   const [newSubtask, setNewSubtask] = useState('');
   /** 子项输入框：提交一条后要立刻聚焦回去，好接着写下一条（连续创建） */
@@ -165,10 +190,12 @@ export default function TaskDetailScreen() {
   const [title, setTitle] = useState('');
   const [note, setNote] = useState('');
   const [location, setLocation] = useState('');
+  const [url, setUrl] = useState('');
   const [waitingFor, setWaitingFor] = useState('');
   const titleRef = useRef('');
   const noteRef = useRef('');
   const locationRef = useRef('');
+  const urlRef = useRef('');
   const waitingRef = useRef('');
   /** 目标值：本期次数 / 每次时长（习惯型才有） */
   const [goalOcc, setGoalOcc] = useState('');
@@ -190,10 +217,12 @@ export default function TaskDetailScreen() {
         setTitle(found.title);
         setNote(found.note ?? '');
         setLocation(found.location ?? '');
+        setUrl(found.url ?? '');
         setWaitingFor(found.waitingFor ?? '');
         titleRef.current = found.title;
         noteRef.current = found.note ?? '';
         locationRef.current = found.location ?? '';
+        urlRef.current = found.url ?? '';
         waitingRef.current = found.waitingFor ?? '';
         const occ = found.targetOccurrences ? String(found.targetOccurrences) : '';
         const min = found.targetMinutes ? String(found.targetMinutes) : '';
@@ -231,6 +260,9 @@ export default function TaskDetailScreen() {
    * 手不用离开键盘 —— 慢的不是操作次数，是"要不要重新点一下输入框"。
    */
   const canAddSubtask = newSubtask.trim().length > 0;
+
+  /** 链接框里现在这串字**能不能真的打开**：能打开才给「打开」按钮 */
+  const openTarget = normalizeUrl(url);
 
   const addSubtaskNow = useCallback(async () => {
     const title = newSubtask.trim();
@@ -345,11 +377,34 @@ export default function TaskDetailScreen() {
     await patch({ location: next || null });
   }, [task, patch]);
 
+  const saveUrl = useCallback(async () => {
+    const next = urlRef.current.trim();
+    if (!task || next === (task.url ?? '')) return;
+    await patch({ url: next || null });
+  }, [task, patch]);
+
   const saveWaiting = useCallback(async () => {
     const next = waitingRef.current.trim();
     if (!task || next === (task.waitingFor ?? '')) return;
     await patch({ waitingFor: next || null });
   }, [task, patch]);
+
+  /**
+   * 打开链接：交给**系统浏览器**，不在 App 里套一层网页。
+   *
+   * 理由很实在 —— 站点的登录态、Cookie、下载、返回手势全在系统浏览器里，
+   * 自己嵌一个 WebView 等于把这些都丢掉，还要再维护一份。
+   *
+   * 存的是用户填的原文（多半没写 `https://`），所以打开前先过 `normalizeUrl`：
+   * 只有它认得出的才给按钮，于是这个 catch 基本只是兜底。
+   */
+  const openUrl = useCallback(() => {
+    const target = normalizeUrl(urlRef.current);
+    if (!target) return;
+    void Linking.openURL(target).catch(() => {
+      Alert.alert('这个链接打不开', target);
+    });
+  }, []);
 
   /**
    * 目标存盘：次数优先（"每周 3 次"这类），只填时长则按时长算。
@@ -413,9 +468,10 @@ export default function TaskDetailScreen() {
     void saveTitle();
     void saveNote();
     void saveLocation();
+    void saveUrl();
     void saveWaiting();
     void saveGoals();
-  }, [saveTitle, saveNote, saveLocation, saveWaiting, saveGoals]);
+  }, [saveTitle, saveNote, saveLocation, saveUrl, saveWaiting, saveGoals]);
 
   /** 离开页面时补一次。返回键 / 手势返回都不经过失焦，只有这里拦得住 */
   const flushRef = useRef(flushPending);
@@ -429,11 +485,12 @@ export default function TaskDetailScreen() {
    */
   const toggleTodayCheckin = useCallback(async () => {
     if (!task) return;
+    fireHaptic();
     if (doneToday) await undoCheckInAction(task.id);
     else await checkInAction(task.id);
     const fresh = await loadTask(task.id);
     if (fresh) setTask(fresh);
-  }, [task, doneToday, checkInAction, undoCheckInAction, loadTask]);
+  }, [task, doneToday, checkInAction, undoCheckInAction, loadTask, fireHaptic]);
 
   /**
    * 转为习惯。
@@ -648,7 +705,20 @@ export default function TaskDetailScreen() {
   const containerLabel = task.containerId
     ? (containers.find((item) => item.id === task.containerId)?.title ?? '已归属')
     : '不归属';
-  const settingsSummary = `${statusLabel} · ${KIND_LABEL[task.kind]} · ${containerLabel}`;
+  const settingsSummary = projectsOn
+    ? `${statusLabel} · ${KIND_LABEL[task.kind]} · ${containerLabel}`
+    : `${statusLabel} · ${KIND_LABEL[task.kind]}`;
+
+  /**
+   * 类型可选项：习惯关了就没有「习惯」这一项。
+   *
+   * 留着它，等于给一个能点、点了却无处可去的选项（习惯页已经不在底栏了）；
+   * 但**已经是习惯的任务照旧显示成习惯** —— 开关只管"还能不能变成"，
+   * 不管"已经是的怎么办"，那部分数据一个字都不动。
+   */
+  const kindOptions = habitsOn
+    ? KIND_OPTIONS
+    : KIND_OPTIONS.filter((option) => option !== TaskKind.Habit);
 
   /**
    * 常驻底栏。这两个动作都会改写这条任务，原来却要滚到页面最底部才够得到 ——
@@ -671,19 +741,35 @@ export default function TaskDetailScreen() {
       <Pressable
         accessibilityRole="button"
         onPress={() =>
-          void (isFrequency ? toggleTodayCheckin() : done ? handleReopen() : handleComplete())
+          void (primaryIsCheckin
+            ? toggleTodayCheckin()
+            : done
+              ? handleReopen()
+              : handleComplete())
         }
         style={({ pressed }) => [
           styles.barPrimary,
           { backgroundColor: theme.text, opacity: pressed ? 0.8 : 1 },
         ]}>
         <Ionicons
-          name={isFrequency ? (doneToday ? 'arrow-undo' : 'add') : done ? 'arrow-undo' : 'checkmark'}
+          name={
+            primaryIsCheckin
+              ? doneToday
+                ? 'arrow-undo'
+                : 'add'
+              : done
+                ? 'arrow-undo'
+                : 'checkmark'
+          }
           size={17}
           color={theme.background}
         />
         <ThemedText type="smallBold" style={{ color: theme.background }}>
-          {isFrequency
+          {/*
+            打卡关了：习惯型的主按钮退回普通的"标记完成" ——
+            它仍然是一件能做完的事，只是不再记"今天做没做"。
+          */}
+          {primaryIsCheckin
             ? doneToday
               ? '撤销今天'
               : '今天打卡'
@@ -703,7 +789,7 @@ export default function TaskDetailScreen() {
       bottomBar={bottomBar}
       scrollEnabled={!wheelLocked}
       subtitle={`${KIND_LABEL[task.kind]}${
-        isFrequency
+        isFrequency && checkinOn
           ? ` · ${describePeriodProgress(task.repeat, task.targetOccurrences, periodCount)}`
           : ''
       }`}
@@ -841,6 +927,44 @@ export default function TaskDetailScreen() {
             placeholderTextColor={theme.textSecondary}
             style={[styles.locationInput, { color: theme.text }]}
           />
+        </View>
+
+        {/*
+          链接：跟地点同级的选填字段，唯一区别是它**能点开**。
+          以前这种东西只能躺在备注里 —— 手机上要手动选中、复制、切浏览器，
+          一套下来没人会做。现在填了就立刻冒出「打开」，点一下走系统浏览器：
+          登录态、Cookie、下载、返回手势全在那边，自己嵌一层网页等于全丢掉。
+        */}
+        <View
+          style={[
+            styles.locationRow,
+            { borderColor: theme.backgroundSelected, backgroundColor: theme.background },
+          ]}>
+          <Ionicons name="link-outline" size={15} color={theme.textSecondary} />
+          <TextInput
+            value={url}
+            onChangeText={(value) => {
+              setUrl(value);
+              urlRef.current = value;
+              scheduleSave('url', saveUrl);
+            }}
+            onBlur={flushPending}
+            placeholder="链接（选填）"
+            placeholderTextColor={theme.textSecondary}
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="url"
+            style={[styles.locationInput, { color: theme.text }]}
+          />
+          {openTarget ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="打开链接"
+              hitSlop={6}
+              onPress={openUrl}>
+              <Ionicons name="open-outline" size={15} color={theme.text} />
+            </Pressable>
+          ) : null}
         </View>
 
         {/* 专注累计：原来挂在最底部的「开始做」卡上，那里现在只剩一个底栏按钮 */}
@@ -1154,7 +1278,7 @@ export default function TaskDetailScreen() {
       {/* 类型：决定它怎么被对待 —— 习惯型才进「习惯」页、才能打卡 */}
       <Card title="类型" hint="能打卡、攒连续天数">
         <View style={styles.chips}>
-          {KIND_OPTIONS.map((option) => (
+          {kindOptions.map((option) => (
             <Chip
               key={option}
               label={KIND_LABEL[option]}
@@ -1226,7 +1350,11 @@ export default function TaskDetailScreen() {
             没有重复规则时"本期"按一天算。
           </ThemedText>
 
-          {isFrequency ? (
+          {/*
+            打卡关了整行收起：这行的两个东西（本期次数、今天打卡）都从打卡记录来，
+            没有打卡它们就是一组永远不变的数字 —— 不动的数字比没有数字更骗人。
+          */}
+          {isFrequency && checkinOn ? (
             <View style={styles.periodRow}>
               <ThemedText type="small">
                 {describePeriodProgress(task.repeat, task.targetOccurrences, periodCount)}
@@ -1254,7 +1382,8 @@ export default function TaskDetailScreen() {
         转为习惯：任务做完就结束，习惯每天重置 —— 差别在**判定域**，
         不是显示方式。所以这一步会同时换掉类型、重复规则、达标方式。
       */}
-      {canConvertToHabit(task) ? (
+      {/* 习惯关了就不给"转成习惯"这条路：习惯页不在了，转过去也是个没门牌的房间 */}
+      {habitsOn && canConvertToHabit(task) ? (
         <Card
           title="转为习惯"
           hint="按打卡次数判定；够目标自动达成">
@@ -1279,32 +1408,38 @@ export default function TaskDetailScreen() {
         </Card>
       ) : null}
 
-      {/* 归属：任务挂在容器下，进度才会汇到目标 / 项目里 */}
-      <Card
-        title="归属"
-        hint={
-          containers.length
-            ? '挂了容器，进度就汇到那个目标 / 项目里'
-            : '还没有容器，去「项目」页建一个目标或项目'
-        }>
-        <View style={styles.chips}>
-          <Chip
-            label="不归属"
-            active={!task.containerId}
-            theme={theme}
-            onPress={() => void patch({ containerId: null })}
-          />
-          {containers.map((container) => (
+      {/*
+        归属：任务挂在容器下，进度才会汇到目标 / 项目里。
+        ⚠️ 项目关了整张卡收起 —— 卡片里的每个 chip 都指向一个已经不存在的页面，
+        留着就是一整排死链。（已有的 containerId 不动：重开项目，归属还在。）
+      */}
+      {projectsOn ? (
+        <Card
+          title="归属"
+          hint={
+            containers.length
+              ? '挂了容器，进度就汇到那个目标 / 项目里'
+              : '还没有容器，去「项目」页建一个目标或项目'
+          }>
+          <View style={styles.chips}>
             <Chip
-              key={container.id}
-              label={container.title}
-              active={task.containerId === container.id}
+              label="不归属"
+              active={!task.containerId}
               theme={theme}
-              onPress={() => void patch({ containerId: container.id })}
+              onPress={() => void patch({ containerId: null })}
             />
-          ))}
-        </View>
-      </Card>
+            {containers.map((container) => (
+              <Chip
+                key={container.id}
+                label={container.title}
+                active={task.containerId === container.id}
+                theme={theme}
+                onPress={() => void patch({ containerId: container.id })}
+              />
+            ))}
+          </View>
+        </Card>
+      ) : null}
 
           {/*
             删除放在这里而不是底栏：它必须存在（能创建就要能删掉），

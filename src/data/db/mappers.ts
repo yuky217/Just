@@ -2,6 +2,7 @@ import type { SQLiteBindValue } from 'expo-sqlite';
 
 import type { BaseEntity } from '@/domain/base';
 import type { Checkin } from '@/domain/checkins';
+import type { PeriodLog } from '@/domain/period';
 import type { Container, Mark as MarkEntity, TaskChain } from '@/domain/container';
 import {
   sanitizeChanges,
@@ -94,6 +95,8 @@ export interface TaskRow extends BaseRow {
   title: string;
   note: string | null;
   location: string | null;
+  /** 链接。可空：老库没有这一列，NULL 一律按"没链接"读 */
+  url: string | null;
   kind: string;
   status: string;
   time_attribute: string;
@@ -134,6 +137,7 @@ export function taskFromRow(row: TaskRow): Task {
     title: row.title,
     note: row.note,
     location: row.location,
+    url: row.url ?? null,
     kind: row.kind as Task['kind'],
     status: row.status as Task['status'],
     time,
@@ -165,6 +169,7 @@ export function taskColumns(task: Task): ColumnMap {
     title: task.title,
     note: task.note ?? null,
     location: task.location ?? null,
+    url: task.url ?? null,
     kind: task.kind,
     status: task.status,
     time_attribute: time.attribute,
@@ -308,6 +313,9 @@ export interface MarkRow extends BaseRow {
   title: string;
   date: string;
   repeat_yearly: number;
+  calendar: string;
+  lunar_md: string | null;
+  term: string | null;
 }
 
 export function markFromRow(row: MarkRow): MarkEntity {
@@ -317,6 +325,10 @@ export function markFromRow(row: MarkRow): MarkEntity {
     title: row.title,
     date: row.date,
     repeatYearly: row.repeat_yearly === 1,
+    // 老库没有 calendar 列时按 'solar' 兜底
+    calendar: (row.calendar as MarkEntity['calendar']) ?? 'solar',
+    lunarMd: row.lunar_md ?? null,
+    term: row.term ?? null,
   };
 }
 
@@ -327,6 +339,9 @@ export function markColumns(mark: MarkEntity): ColumnMap {
     title: mark.title,
     date: mark.date,
     repeat_yearly: mark.repeatYearly ? 1 : 0,
+    calendar: mark.calendar ?? 'solar',
+    lunar_md: mark.lunarMd ?? null,
+    term: mark.term ?? null,
     ...writeBase(mark),
   };
 }
@@ -404,6 +419,35 @@ export function checkinColumns(checkin: Checkin): ColumnMap {
     minute_of_day: checkin.minuteOfDay ?? null,
     note: checkin.note ?? null,
     ...writeBase(checkin),
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Period log (经期)                                                    */
+/* ------------------------------------------------------------------ */
+
+export interface PeriodRow extends BaseRow {
+  start_date: string;
+  length: number;
+  note: string | null;
+}
+
+export function periodFromRow(row: PeriodRow): PeriodLog {
+  return {
+    ...readBase(row),
+    startDayKey: row.start_date,
+    length: row.length,
+    note: row.note,
+  };
+}
+
+export function periodColumns(log: PeriodLog): ColumnMap {
+  return {
+    id: log.id,
+    start_date: log.startDayKey,
+    length: log.length,
+    note: log.note ?? null,
+    ...writeBase(log),
   };
 }
 

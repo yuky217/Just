@@ -1,9 +1,6 @@
 import { StyleSheet, View } from 'react-native';
 
-import { ThemedText } from '@/components/themed-text';
-import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
-import { formatDuration } from '@/utils/datetime';
 
 /**
  * 专注界面的"小东西"（主文档第六节）。
@@ -11,16 +8,20 @@ import { formatDuration } from '@/utils/datetime';
  * 唯一必须遵守的规则：**只涨不落，不惩罚**。
  * 所以下面的 scale 是累计秒数的单调函数 —— 中途退出、提前结束，
  * 它只会保持原样，绝不会缩回去。动画留到后续版本再加。
+ *
+ * ⚠️ 2026-10-13：**它自己不带任何文字**。
+ * 以前球下面挂着一行"已生长 3 小时 12 分"，而那一行说的是**过去**：
+ * 用户站在这儿要决定的是"现在做什么"，不是欣赏自己攒了多少。
+ * 首页把球本身当成了开始键，字更不能压在键上 —— 想看的时长数字，
+ * 专注页里那颗大计时器上一直都有。
  */
 export interface GrowthOrbProps {
   /** 累计生长秒数 */
   seconds: number;
   size?: number;
-  /** 传 null 不显示；不传默认显示生长时长（首页用默认，专注页大字计时器就在旁边，关掉免得说两遍） */
-  caption?: string | null;
 }
 
-export function GrowthOrb({ seconds, size = 96, caption }: GrowthOrbProps) {
+export function GrowthOrb({ seconds, size = 96 }: GrowthOrbProps) {
   const theme = useTheme();
 
   // 对数增长：前期长得快（有反馈），后期变慢但永不回退
@@ -52,11 +53,6 @@ export function GrowthOrb({ seconds, size = 96, caption }: GrowthOrbProps) {
           },
         ]}
       />
-      {caption === null ? null : (
-        <ThemedText type="small" themeColor="textSecondary" style={styles.caption}>
-          {caption ?? `已生长 ${formatDuration(seconds)}`}
-        </ThemedText>
-      )}
     </View>
   );
 }
@@ -64,5 +60,4 @@ export function GrowthOrb({ seconds, size = 96, caption }: GrowthOrbProps) {
 const styles = StyleSheet.create({
   wrapper: { alignItems: 'center', justifyContent: 'center' },
   core: { position: 'absolute' },
-  caption: { position: 'absolute', bottom: -Spacing.four, fontSize: 12 },
 });

@@ -24,6 +24,66 @@ import { taskAnchor, type RepeatRule, type Task } from './task';
  * 现在 `null` 有明确含义，而且与**课表**的同一个字段名取得了一致（那边一直是 null = 不提醒）。
  */
 
+/**
+ * 提醒的**档位**（原生通道用，2026-10-13 定）。
+ *
+ * `normal` 走 expo 那套；`important` / `deadline` 走原生通道
+ * （顶部横幅 / 全屏弹窗 / 闹钟分类穿勿扰）—— 见 entry/native-reminders.ts。
+ * ⚠️ 原生那三件事（FSI 弹窗 / 覆盖勿扰 / 持续提醒）本轮**不做**；
+ * 当前的"重要提醒"只靠系统通知渠道区分（见 `reminderTierOf`），不进原生。
+ */
+export type ReminderLevel = 'normal' | 'important' | 'deadline';
+
+/**
+ * 提醒的**铃声档位**（2026-10-14，系统通知渠道两档）。
+ *
+ * 普通 = 系统默认渠道；重要 = 一个 importance 更高、声音更明显的渠道
+ * （"稍明显"，**不是**全屏弹窗 / 穿勿扰 / 持续震动）。
+ *
+ * ## 判定（只认这三类，其余一律普通）
+ *
+ * ① **出发类**：标题 / 备注里有明确准备动作词
+ *    （出发 / 出门 / 赶飞机 …，`defaultReminderMinutes` 据此把**默认**提前量抬到 60 分钟）。
+ *    这些事光知道几点没用，得提前收拾，提醒得更显眼才不会被漏掉。
+ * ② **临近的截止**：deadline 属性，且截止时刻已逼近（24 小时内）。
+ *    远在未来的截止不该现在就响得急 —— 那只会让人习惯性地划掉它。
+ * ③ **考试**：单独走 `syncEventReminders`，那里直接打重要渠道，
+ *    所以这里收不到考试（CalEvent 不是 Task）。
+ *
+ * ⚠️ 与旧的 `ReminderLevel`（P0 + 任意截止）不同：重要档**刻意收得很窄**
+ * （与「档位的价值在于稀缺」同一个道理）。只有"要出门 / 马上到点的截止"这两类
+ * 真值得打扰人的才升重要；考试天然重要，由考试那条路单独保证。
+ */
+export type ReminderTier = 'normal' | 'important';
+
+/** "临近"的口径：截止时刻落在这段时间窗口内才算临近 */
+export const APPROACHING_DEADLINE_MS = 24 * 60 * 60 * 1000;
+
+export function reminderTierOf(task: Task, now: Date = new Date()): ReminderTier {
+  // 出发类：用 defaultReminderMinutes===60 识别（正是用户指定的判定口径），
+  // 但要排除 deadline —— deadline 也会返回 60，它由下面的"临近截止"接管。
+  const text = [task.title, task.note].filter(Boolean).join(' ');
+  if (text) {
+    const defaultMin = defaultReminderMinutes({
+      kind: task.kind,
+      attribute: task.time.attribute,
+      repeat: task.repeat,
+      location: task.location,
+      text,
+    });
+    if (defaultMin === 60 && task.time.attribute !== TimeAttribute.Deadline) return 'important';
+  }
+  // 临近的截止：deadline 且还没过、已逼近
+  if (task.time.attribute === TimeAttribute.Deadline) {
+    const anchor = taskAnchor(task);
+    if (anchor) {
+      const diff = new Date(anchor).getTime() - now.getTime();
+      if (diff >= 0 && diff <= APPROACHING_DEADLINE_MS) return 'important';
+    }
+  }
+  return 'normal';
+}
+
 /** 下一次提醒的触发时刻；null = 这条任务不会响 */
 export function nextFireAt(task: Task, now: Date = new Date()): Date | null {
   // 口径只有一处（reminderFireTimes），这里只是取"最早的那个" ——

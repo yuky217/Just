@@ -1,0 +1,33 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+  <!--
+    精确闹钟（2026-10-13）：提醒必须"到点就响"，差五分钟就等于没提醒。
+    Android 12+ 要 SCHEDULE_EXACT_ALARM；Android 14 起它对普通应用默认不授予，
+    这时退到 USE_EXACT_ALARM（受限权限，侧载可用，应用商店会审）。
+    运行时用 AlarmManager.canScheduleExactAlarms() 判，拿不到就**降级成不精确**
+    （setAndAllowWhileIdle，最多晚几分钟）—— 宁可晚几分钟，也不能不响。
+  -->
+  <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+  <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+
+  <!-- 全屏弹窗（截止提醒用）：锁屏/看视频时也要看得见 -->
+  <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+
+  <!--
+    勿扰例外（覆盖勿扰）：声明了才能把用户送去系统设置里开。
+    ⚠️ 这个权限**不能靠代码要** —— 只能跳设置页，用户自己开。
+    鸿蒙对勿扰的管控比原生 Android 更严，所以界面上写的是"不保证百分百"。
+  -->
+  <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
+
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <uses-permission android:name="android.permission.VIBRATE" />
+
+  <application>
+    <!-- 到点发通知的那个接收器。exported=false：只有本应用的 PendingIntent 能戳它 -->
+    <receiver
+      android:name="com.aiyuexi.aischedule.reminder.ReminderReceiver"
+      android:enabled="true"
+      android:exported="false" />
+  </application>
+</manifest>

@@ -11,9 +11,11 @@ import { NextCourseCard } from '@/components/next-course-card';
 import { Screen } from '@/components/screen';
 import { ThemedText } from '@/components/themed-text';
 import { ChoiceSheet, type ChoiceOption } from '@/components/choice-sheet';
+import { PeriodCard } from '@/components/period-card';
 import { Spacing } from '@/constants/theme';
 import { hasCheckedInOn } from '@/domain/checkins';
 import { TaskStatus } from '@/domain/enums';
+import { isCheckinOn } from '@/domain/features';
 import {
   defaultFocusIndex,
   FOCUS_PICKER_LIMIT,
@@ -22,7 +24,9 @@ import {
 import type { CaptureRoute } from '@/domain/routing';
 import { taskAnchor, type Task } from '@/domain/task';
 import { useTheme } from '@/hooks/use-theme';
+import { useHaptics } from '@/hooks/use-haptics';
 import { useAppStore } from '@/state/app-store';
+import { useSettings } from '@/state/settings-store';
 import { formatDateLong, formatDayTime } from '@/utils/datetime';
 
 /**
@@ -30,9 +34,11 @@ import { formatDateLong, formatDayTime } from '@/utils/datetime';
  *
  * 这一版把"重心"从列表挪到了专注，但**不是**把一个空计时器摆在门口：
  *   1. 记录 —— 一颗悬浮的「＋」，点开才问（常驻输入框太占地方，见 components/fab.tsx）
- *   2. 专注 —— **一个提案**（一件事 + 一句"为什么是它"）+ 一个动作。
+ *   2. 专注 —— **一个提案**（一件事 + 一句"为什么是它"）+ 点那颗球就开工。
  *      提案的规则全在 domain/focus-candidate.ts，页面只负责显示。
- *      挑的规则是"停在哪件就是哪件"，确认只有一个键。
+ *      挑的规则是"停在哪件就是哪件"；至于"开始"这个动作，**没有再画一枚键**：
+ *      生长球自己就是键（2026-10-13）。球是用户攒出来的东西，点它开始
+ *      比点一个写着"开始"的方块更说得通，也少一样要瞄的东西。
  *   3. 慢事 —— 课与习惯并成**一块里的两行**，中间一条细线：
  *      线以上是"现在"（专注是这一屏唯一的重心），以下是"今天的背景"。
  *      习惯那一行就是今天那几次，点一下即打卡；新建/翻看去独立页（`/habits`）。
@@ -53,6 +59,7 @@ const ROUTE_FEEDBACK: Record<CaptureRoute, string> = {
 export default function HomeScreen() {
   const router = useRouter();
   const theme = useTheme();
+  const fireHaptic = useHaptics();
 
   const today = useAppStore((state) => state.today);
   const growthSeconds = useAppStore((state) => state.growthSeconds);
@@ -66,6 +73,17 @@ export default function HomeScreen() {
   const checkins = useAppStore((state) => state.checkins);
   const checkIn = useAppStore((state) => state.checkIn);
   const undoCheckIn = useAppStore((state) => state.undoCheckIn);
+
+  /*
+   * 功能开关：首页是唯一一处同时挂着"习惯 / 打卡 / 回顾"三个入口的地方，
+   * 所以这三个开关都得在这儿判。关掉的习惯整行不出现（它的家也没了）；
+   * 只关打卡则那排 chip 还在（习惯还是今天要做的事），只是**不再一点即打卡** ——
+   * 点一下改成进它的详情页，人总得有个地方可去。
+   */
+  const features = useSettings((state) => state.features);
+  const habitsOn = features.habits ?? true;
+  const checkinOn = isCheckinOn(features);
+  const reviewOn = features.review ?? true;
 
   /**
    * 专注选择器的候选：今天要面对的那几件。
@@ -215,11 +233,9 @@ export default function HomeScreen() {
   const startLabel =
     selected?.kind === 'more'
       ? '从全部里挑'
-      : selected?.kind === 'task'
-        ? '开始专注'
-        : newTitle.trim()
-          ? '记下并开始'
-          : '开始';
+      : selected?.kind === 'new' && newTitle.trim()
+        ? '记下并开始'
+        : '开始专注';
 
   return (
     <Screen
@@ -235,12 +251,26 @@ export default function HomeScreen() {
           <Pressable hitSlop={12} accessibilityLabel="搜索" onPress={() => router.push('/search')}>
             <Ionicons name="search-outline" size={21} color={theme.textSecondary} />
           </Pressable>
+          {/*
+            自习室：一个只翻到分钟的翻页钟，不记时长、不绑任务。
+            放页头而不是首页中间 —— 它是"偶尔进去待一会儿"的地方，
+            给它一张卡等于天天在那儿提醒用户还有这么个东西。
+          */}
           <Pressable
             hitSlop={12}
-            accessibilityLabel="回顾"
-            onPress={() => router.push('/review')}>
-            <Ionicons name="stats-chart-outline" size={21} color={theme.textSecondary} />
+            accessibilityLabel="自习室"
+            onPress={() => router.push('/study-room')}>
+            <Ionicons name="time-outline" size={21} color={theme.textSecondary} />
           </Pressable>
+          {/* 回顾关了：这颗图标整个不出现（页面本身没有别的入口，删掉它就是删干净了） */}
+          {reviewOn ? (
+            <Pressable
+              hitSlop={12}
+              accessibilityLabel="回顾"
+              onPress={() => router.push('/review')}>
+              <Ionicons name="stats-chart-outline" size={21} color={theme.textSecondary} />
+            </Pressable>
+          ) : null}
           <Pressable hitSlop={12} onPress={() => router.push('/settings')}>
             <Ionicons name="settings-outline" size={22} color={theme.textSecondary} />
           </Pressable>
@@ -331,9 +361,29 @@ export default function HomeScreen() {
         靠材质把这两类分开 —— 别让它们排成一串同样重的方块。
       */}
       <Card bare>
-        {/* 没有标题没有提示语，orb 自己站一行；padding 是留给 orb 下面那行字（caption）的，它绝对定位、不占布局 */}
+        {/*
+          ⭐ 球就是键（2026-10-13 用户点名"删掉开始专注那个按键，入口改为生长的那个东西"）。
+
+          以前这里是"球（装饰）+ 一个键（动作）"两样东西：球说自己长到多大了，
+          键说"开始"。可那两件事本来就指向同一个动作 —— 而这颗球是用户自己
+          攒出来的东西，点它开始比点一个写着"开始"的方块更说得通。
+          所以球自己可点：64 那一圈就是触达范围（再补 10 点 hitSlop 给手指），
+          按下去干什么仍然只由指针停在哪一格决定（`startLabel` 就是它的名字，交给读屏）。
+
+          球下面那行"已生长 3 小时 12 分"也一并撤了：它说的是过去，
+          而站在这儿要决定的是现在。时长在专注页那颗大计时器上随时看得到。
+        */}
         <View style={styles.focusOrbRow}>
-          <GrowthOrb seconds={growthSeconds} size={72} />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={starting ? '准备中' : startLabel}
+            accessibilityState={{ disabled: starting }}
+            disabled={starting}
+            hitSlop={10}
+            onPress={() => void start()}
+            style={({ pressed }) => ({ opacity: pressed || starting ? 0.55 : 1 })}>
+            <GrowthOrb seconds={growthSeconds} size={64} />
+          </Pressable>
         </View>
 
         <FocusPicker
@@ -343,25 +393,10 @@ export default function HomeScreen() {
           newTitle={newTitle}
           onNewTitleChange={setNewTitle}
         />
-
-        {/* 只有一个键：按下它干什么，由指针停在谁身上决定 */}
-        <Pressable
-          accessibilityRole="button"
-          accessibilityState={{ disabled: starting }}
-          disabled={starting}
-          onPress={() => void start()}
-          style={({ pressed }) => [
-            styles.startButton,
-            { backgroundColor: theme.text, opacity: pressed || starting ? 0.8 : 1 },
-          ]}>
-          <ThemedText type="smallBold" style={{ color: theme.background }}>
-            {starting ? '准备中…' : startLabel}
-          </ThemedText>
-        </Pressable>
       </Card>
 
       {/* 慢事：课与习惯同处一块，中间一条细线 —— 线以上是"现在"，以下是"今天的背景" */}
-      {habits.length ? (
+      {habitsOn && habits.length ? (
         <View style={[styles.slowCard, { backgroundColor: theme.backgroundElement }]}>
           {/* bare + dividerAfter：它退成这块里的第一行，线由它自己画（没课时它整个不渲染） */}
           <NextCourseCard
@@ -392,16 +427,28 @@ export default function HomeScreen() {
                 showsHorizontalScrollIndicator={false}
                 contentContainerStyle={styles.habitChips}>
                 {habits.map((habit) => {
-                  const done = hasCheckedInOn(checkinKeys.get(habit.id) ?? [], new Date());
+                  // 打卡关了就不问"今天打没打"：那排 chip 只是今天的习惯清单
+                  const done = checkinOn && hasCheckedInOn(checkinKeys.get(habit.id) ?? [], new Date());
                   return (
                     <Pressable
                       key={habit.id}
                       accessibilityRole="button"
                       accessibilityState={{ checked: done }}
                       accessibilityLabel={
-                        done ? `撤销今天的「${habit.title}」打卡` : `今天「${habit.title}」打卡`
+                        !checkinOn
+                          ? habit.title
+                          : done
+                            ? `撤销今天的「${habit.title}」打卡`
+                            : `今天「${habit.title}」打卡`
                       }
-                      onPress={() => void (done ? undoCheckIn(habit.id) : checkIn(habit.id))}
+                      onPress={() => {
+                        if (!checkinOn) {
+                          void router.push(`/task/${habit.id}`);
+                          return;
+                        }
+                        fireHaptic();
+                        void (done ? undoCheckIn(habit.id) : checkIn(habit.id));
+                      }}
                       style={[
                         styles.habitChip,
                         {
@@ -436,6 +483,9 @@ export default function HomeScreen() {
         <NextCourseCard onPress={(courseId) => router.push(`/course/${courseId}`)} />
       )}
 
+      {/* 经期：关掉功能时整张卡不渲染（PeriodCard 内部已判 features.period） */}
+      <PeriodCard />
+
       {/* 「＋」那一格的去向：全部还没做完的事，挑一件就把它摆到指针下面 */}
       <ChoiceSheet
         visible={allOpen}
@@ -455,14 +505,7 @@ const styles = StyleSheet.create({
   focusReceiptActions: { flexDirection: 'row', gap: Spacing.two, marginTop: Spacing.two },
   homeContent: { paddingBottom: FAB_SIZE + Spacing.three },
   headerActions: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three },
-  focusOrbRow: { alignItems: 'center', paddingBottom: Spacing.four },
-  // 通栏的大键：它是整张卡的落点，也是首页唯一的主按钮
-  startButton: {
-    marginTop: Spacing.one,
-    alignItems: 'center',
-    paddingVertical: Spacing.three,
-    borderRadius: Spacing.three,
-  },
+  focusOrbRow: { alignItems: 'center', paddingBottom: Spacing.three },
   ghostButton: {
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,

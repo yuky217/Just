@@ -42,10 +42,24 @@ export interface TaskChain extends BaseEntity {
 }
 
 /** 标记（主文档 5.3）：独立于任务，不参与排程 */
+export type CalendarKind = 'solar' | 'lunar' | 'term';
+
 export interface Mark extends BaseEntity {
   kind: 'countdown' | 'countup';
   title: string;
-  /** YYYY-MM-DD */
+  /**
+   * 公历锚点（YYYY-MM-DD）。
+   *
+   * 农历 / 节气标记也**照样存一个公历锚点**：正数日直接拿它算"已经多少天"，
+   * 倒数日则忽略它、改由 `nextMarkDate` 按历法往前滚到下一次函数。
+   * 这样一套口径兼容三种历法，不另开字段。
+   */
   date: string;
   repeatYearly: boolean;
+  /** 历法：公历（默认）/ 农历 / 节气。老数据没这列，读出来按 'solar' 处理 */
+  calendar?: CalendarKind;
+  /** 农历月日：'8-15' = 八月十五，'leap2-5' = 闰二月初五。仅农历标记有 */
+  lunarMd?: string | null;
+  /** 节气名（如 '清明'）。仅节气标记有 */
+  term?: string | null;
 }

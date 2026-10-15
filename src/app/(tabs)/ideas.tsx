@@ -1,7 +1,16 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, StyleSheet, TextInput, View } from 'react-native';
+import {
+  Alert,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  Pressable,
+  StyleSheet,
+  TextInput,
+  View,
+} from 'react-native';
 import ReanimatedSwipeable, {
   type SwipeableMethods,
 } from 'react-native-gesture-handler/ReanimatedSwipeable';
@@ -10,11 +19,13 @@ import { Card } from '@/components/card';
 import { CaptureInput } from '@/components/capture-input';
 import { ChoiceSheet, type ChoiceOption } from '@/components/choice-sheet';
 import { EmptyState } from '@/components/empty-state';
+import { MultiSelectBar } from '@/components/multi-select-bar';
 import { TagEditorSheet } from '@/components/tag-editor-sheet';
 import { Screen } from '@/components/screen';
 import { ThemedText } from '@/components/themed-text';
 import { UndoBar } from '@/components/undo-bar';
-import { BottomTabInset, Spacing } from '@/constants/theme';
+import { Spacing } from '@/constants/theme';
+import { CaptureSource } from '@/domain/enums';
 import type { Idea } from '@/domain/idea';
 import { IDEA_TIME_RANGES, IDEA_TIME_RANGE_LABEL, filterIdeas } from '@/domain/idea-filter';
 import type { IdeaTimeRange } from '@/domain/idea-filter';
@@ -79,6 +90,13 @@ export default function IdeasScreen() {
   */
   const [searchOpen, setSearchOpen] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
+  /*
+    记录框从"常驻一整栏"变成页头那枚「＋」（2026-10-13）。
+    它此前稳稳占着列表最上面一整行，而绝大多数时候那里是空的 ——
+    一行空白天天从列表身上抠高度。现在列表从顶部开始，
+    要写的时候点「＋」：面板里只有"写什么"，落库走的是同一条 `capture`。
+  */
+  const [composing, setComposing] = useState(false);
   /*
     主列表多选删除。想法页只有主列表会积压（归档箱里一条条删就够了），
     所以选择模式只开在主列表。
@@ -304,9 +322,9 @@ export default function IdeasScreen() {
       */
       right={
         /*
-          页头三个动作：选择 · 搜索 · 筛选。
+          页头四个动作：选择 · 搜索 · 筛选 · ＋。
           后两个此前是**常驻两行**（一个带框的搜索框、一排四个时间 chip）——
-          而默认状态下它们一个字都没说。搬进页头之后，这一页的顶部只剩记录框。
+          而默认状态下它们一个字都没说。搬进页头之后，这一页的顶部只剩列表。
           齿轮撤了：设置的家在首页，想法页不放第二处。
         */
         <View style={styles.headerActions}>
@@ -360,6 +378,20 @@ export default function IdeasScreen() {
               color={filtering ? theme.tint : theme.textSecondary}
             />
           </Pressable>
+          {/*
+            记一个念头。**它在最外沿**（和待办页那颗「＋」同一个位置）：
+            这一页唯一的动作，也是列表空了之后唯一该做的事。
+            选择模式下收起来 —— 那一刻每一行都是"选中/取消"，不再插新的进来。
+          */}
+          {selectingIdeas ? null : (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="记一个念头"
+              hitSlop={6}
+              onPress={() => setComposing(true)}>
+              <Ionicons name="add" size={24} color={theme.text} />
+            </Pressable>
+          )}
         </View>
       }
       floating={
@@ -370,23 +402,7 @@ export default function IdeasScreen() {
             - 删除后（undoToken 非空）："已删 N 条" + 「撤销」。两者互斥，先删后撤销。
           */}
           {selectingIdeas && selectedIdeaIds.size > 0 ? (
-            <View
-              style={[
-                styles.selectBar,
-                { backgroundColor: theme.backgroundElement },
-              ]}>
-              <ThemedText type="small" themeColor="text">
-                已选 {selectedIdeaIds.size}
-              </ThemedText>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="删除选中的想法"
-                onPress={deleteSelectedIdeas}>
-                <ThemedText type="small" themeColor="tint" style={styles.selectAction}>
-                  删除
-                </ThemedText>
-              </Pressable>
-            </View>
+            <MultiSelectBar count={selectedIdeaIds.size} onDelete={deleteSelectedIdeas} />
           ) : null}
           <UndoBar
             visible={ideaUndo !== null}
@@ -398,16 +414,9 @@ export default function IdeasScreen() {
         </>
       }>
       {/*
-        想法页这一格就是为灵感生的（ideaOnly）：不给时间/清单/重复/提醒 ——
-        想法不排期也不催办，摆着那四个键只能让人以为"灵感也得定个时间"。
+        这一页顶部不再常驻输入框 —— 记录入口在页头的「＋」（见上面的注释，
+        面板本身在页面最后）。列表因此从屏幕最上面就开始，一屏多出一行。
       */}
-      <CaptureInput
-        placeholder="记一个念头、一点灵感…"
-        ideaOnly
-        onSubmit={async (text) => {
-          await capture({ text, markedAsInspiration: true });
-        }}
-      />
 
       {/* 搜索框只在"正在搜"的时候出现 —— 默认它是空的，占着一行什么也没说 */}
       {searchOpen ? (
@@ -515,7 +524,7 @@ export default function IdeasScreen() {
         <EmptyState
           icon="bulb-outline"
           title={filtering ? '没有匹配的想法' : '想法库还是空的'}
-          hint={filtering ? '换个说法或清掉筛选' : '随手记一句，将来的你会感谢现在的你'}
+          hint={filtering ? '换个说法或清掉筛选' : '点右上角的「＋」随手记一句，将来的你会感谢现在的你'}
         />
       )}
 
@@ -586,6 +595,53 @@ export default function IdeasScreen() {
         onSave={handleSaveTags}
         onClose={closeTagEditor}
       />
+
+      {/*
+        记一个念头（2026-10-13）：页头「＋」点开的那块面板。
+        复用 `CaptureInput`（ideaOnly）而不是另写一个输入框 ——
+        "想法不排期、不提醒、不归项目"这句话只在它里面说过一次，
+        页面再抄一遍就会长出第二个口径。落库也仍是 `capture({markedAsInspiration:true})`。
+        提交后就收起来：这一下已经完成，用户要的是回到列表看它在那儿。
+      */}
+      <Modal
+        visible={composing}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setComposing(false)}>
+        <KeyboardAvoidingView
+          style={styles.fill}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <Pressable style={styles.backdrop} onPress={() => setComposing(false)}>
+            <Pressable
+              style={[styles.composeSheet, { backgroundColor: theme.background }]}
+              onPress={(event) => event.stopPropagation()}>
+              <View style={[styles.handle, { backgroundColor: theme.backgroundSelected }]} />
+              <ThemedText type="smallBold" style={styles.sheetTitle}>
+                记一个念头
+              </ThemedText>
+              <CaptureInput
+                autoFocus
+                ideaOnly
+                placeholder="想到什么就写下来，不用想清楚它属于哪里"
+                onSubmit={async (text, options) => {
+                  await capture({
+                    text,
+                    markedAsInspiration: true,
+                    // 语音说的念头同样记 source = voice（createIdea 的口径）
+                    source: options.voiceUsed ? CaptureSource.Voice : undefined,
+                  });
+                  setComposing(false);
+                }}
+                onVoiceError={(message) => {
+                  // 面板自己会收起来，错误只能弹一次对话框；网页端没有 Alert
+                  if (Platform.OS === 'web') return;
+                  Alert.alert('语音输入', message);
+                }}
+              />
+            </Pressable>
+          </Pressable>
+        </KeyboardAvoidingView>
+      </Modal>
 
       {/* 筛选面板（页头那个图标弹出来的）：时间范围 + 清除 */}
       <ChoiceSheet
@@ -773,8 +829,25 @@ function IdeaRow({
 }
 
 const styles = StyleSheet.create({
-  /** 页头右上角：选择（词）· 搜索 · 筛选 */
+  /** 页头右上角：选择（词）· 搜索 · 筛选 · ＋ */
   headerActions: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three },
+  /**
+   * 记录面板（页头「＋」弹出来的）。和习惯页那块是同一副骨架：
+   * 贴底、上面留一条把手、圆角只在上面两个角 —— 它是一块拉上来的面板，
+   * 不是一张浮在中间的对话框。
+   */
+  fill: { flex: 1 },
+  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)', justifyContent: 'flex-end' },
+  composeSheet: {
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    paddingHorizontal: Spacing.three,
+    paddingTop: Spacing.two,
+    paddingBottom: Spacing.four,
+    gap: Spacing.two,
+  },
+  handle: { width: 36, height: 4, borderRadius: 2, alignSelf: 'center' },
+  sheetTitle: { textAlign: 'center' },
   searchBox: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -868,25 +941,7 @@ const styles = StyleSheet.create({
     marginTop: Spacing.one,
   },
   /**
-   * 选择模式下的底部浮条（"已选 N · 删除"）。和 UndoBar 共用浮层定位，
-   * 但它是操作条不是提示条，所以单独一个样式：靠上、不叠在撤销条的位置。
+   * 选择模式下的底部浮条现已共用 `MultiSelectBar` 组件（与待办页同一份），
+   * 这里不再保留单独的样式。
    */
-  selectBar: {
-    position: 'absolute',
-    left: Spacing.three,
-    right: Spacing.three,
-    bottom: BottomTabInset + Spacing.three,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.two,
-    borderRadius: Spacing.three,
-    shadowColor: '#000',
-    shadowOpacity: 0.16,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 6,
-  },
-  selectAction: { fontWeight: '600' },
 });

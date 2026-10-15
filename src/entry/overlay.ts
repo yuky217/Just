@@ -4,35 +4,41 @@ import { Linking, Platform } from 'react-native';
 import { ensureNotificationPermission, getReminderSupport } from './notifications';
 
 /**
- * 悬浮窗 —— 入口层在 Android 上的形态（主文档的「记录无感」）。
+ * 入口层在 Android 上的原生形态（主文档的「记录无感」）。
+ *
+ * 2026-10-13 起只剩两件（悬浮球已删，见 `modules/overlay` 的模块注释）：
+ * ① **通知栏常驻入口** —— 点一下弹透明输入框，记完走深链落库；
+ * ② **专注时间浮条** —— 专注中退出应用时浮一条会走字的小条，点它回专注页。
  *
  * 为什么不并进 `notifications.ts`：它们是两种不同的"能力可能不存在"。
- * 提醒是**系统授权**问题；悬浮窗是**打包形态**问题 —— 它是原生模块，
+ * 提醒是**系统授权**问题；这里是**打包形态**问题 —— 它们是原生模块，
  * 网页端和 Expo Go 里根本不存在，只有独立安装的 Android 版才有。
  * 混在一起写，会让"能力层"这件事变得说不清。
  *
  * 三条纪律，跟提醒卡一致：
- * ① **默认关闭**。它会在屏幕上一直占一块地方，这种侵入性的东西绝不自动开。
- * ② **探真实状态，不靠猜**。`getOverlaySupport()` 读的是原生侧的实际值
- *    （权限给没给、服务在不在跑），不是本地记的"用户点过开关"。
- * ③ **拿不到原生模块就降级**，不抛异常、不拖垮页面 ——
+ * ① **探真实状态，不靠猜**。`getFocusBarSupport()` / `getNotifyEntrySupport()`
+ *    读的是原生侧的实际值（权限给没给、东西在不在），不是本地记的"用户点过开关"。
+ * ② **拿不到原生模块就降级**，不抛异常、不拖垮页面 ——
  *    网页端渲染设置页时这条路径每次都会走到。
- *
- * 用户意愿（要不要开）由 `state/settings-store` 持久化；这里只负责"做得到做不到"。
+ * ③ 用户意愿（要不要开）由 `state/settings-store` 持久化；这里只负责"做得到做不到"。
  */
 
-/** 原生模块暴露的接口，与 `modules/overlay` 里的 `ModuleDefinition` 一一对应 */
+/** 原生模块暴露的接口，与 `modules/overlay` 里的 ModuleDefinition 一一对应 */
 type OverlayNativeModule = {
-  isSupported: () => boolean;
   canDrawOverlays: () => boolean;
-  isShowing: () => boolean;
   requestPermission: () => Promise<boolean>;
-  show: () => Promise<boolean>;
-  hide: () => Promise<boolean>;
   /** 通知栏入口：那条常驻通知发出去没有 */
   isEntryShowing: () => boolean;
   showEntry: () => Promise<boolean>;
   hideEntry: () => Promise<boolean>;
+  /** 专注时间浮条：现在浮着没有（转瞬状态，仅供设置页显示） */
+  isFocusBarShowing: () => boolean;
+  showFocusBar: (
+    startedAtMs: number,
+    accumulatedMs: number,
+    paused: boolean,
+  ) => Promise<boolean>;
+  hideFocusBar: () => Promise<boolean>;
 };
 
 export type OverlayStatus =
@@ -45,7 +51,7 @@ export type OverlayStatus =
 
 export interface OverlaySupport {
   status: OverlayStatus;
-  /** 气泡是不是正浮着 */
+  /** 浮条是不是正浮着 */
   showing: boolean;
   /** 给界面直接显示的一句话 */
   message: string;
@@ -68,8 +74,16 @@ function native(): OverlayNativeModule | null {
   return cached;
 }
 
-/** 探查当前真实状态。这是界面上一切判断的唯一出处。 */
-export async function getOverlaySupport(): Promise<OverlaySupport> {
+/*
+ * ---------------- 专注时间浮条（2026-10-13） ----------------
+ *
+ * 授权门与通知栏入口**不同**：浮条要画在别的应用之上，必须
+ * 「显示在其他应用上层」；跳系统授权页的结果没有原生回调，
+ * 由设置页监听 AppState 回前台时重探状态收口。
+ */
+
+/** 探查浮条的真实状态。设置页进来探一次，之后每次回前台再探。 */
+export async function getFocusBarSupport(): Promise<OverlaySupport> {
   const mod = native();
   if (!mod) {
     return {
@@ -78,10 +92,9 @@ export async function getOverlaySupport(): Promise<OverlaySupport> {
       message:
         Platform.OS === 'android'
           ? '要装独立安装版才有；Expo Go 和网页端都缺原生模块'
-          : '悬浮窗只有 Android 有；iOS 不允许应用画在别的应用之上',
+          : '浮条只有 Android 有；iOS 不允许应用画在别的应用之上',
     };
   }
-
   try {
     if (!mod.canDrawOverlays()) {
       return {
@@ -90,70 +103,18 @@ export async function getOverlaySupport(): Promise<OverlaySupport> {
         message: '还差一步授权：允许「显示在其他应用上层」',
       };
     }
-    const showing = mod.isShowing();
     return {
       status: 'ready',
-      showing,
-      message: showing ? '正浮着，点一下就能记' : '现在没开',
+      showing: mod.isFocusBarShowing(),
+      message: '专注中退出应用，会浮一条时间条',
     };
   } catch {
     return { status: 'unavailable', showing: false, message: '当前环境下用不了' };
   }
 }
 
-/**
- * 开启。没授权就先跳系统设置页。
- *
- * 注意：跳出去之后用户授权完回来，**还需要再调一次本函数**才真的能开 ——
- * 这个"回来接着开"由设置页监听 AppState 完成，见 `app/settings.tsx`。
- */
-export async function enableOverlay(): Promise<OverlaySupport> {
-  const mod = native();
-  if (!mod) return getOverlaySupport();
-  try {
-    if (!mod.canDrawOverlays()) {
-      await mod.requestPermission();
-    } else {
-      await mod.show();
-    }
-  } catch {
-    // 授权被拒 / 系统拒绝启动前台服务：如实返回当前状态即可
-  }
-  return getOverlaySupport();
-}
-
-export async function disableOverlay(): Promise<OverlaySupport> {
-  const mod = native();
-  if (mod) {
-    try {
-      await mod.hide();
-    } catch {
-      // 同上，失败不改写"当前状态"的判断来源
-    }
-  }
-  return getOverlaySupport();
-}
-
-/**
- * 启动时按用户上次的选择恢复气泡。
- *
- * 为什么需要它：不是"开机自启"那么大的事，而是 —— 用户开过一次之后，
- * 不该因为 App 重启就得再去设置页点一次。开一次就一直在，才叫简单。
- * 用户没开过（`enabled === false`）时这里什么都不做，不产生任何副作用。
- */
-export async function restoreOverlayIfEnabled(enabled: boolean): Promise<void> {
-  if (!enabled) return;
-  const mod = native();
-  if (!mod) return;
-  try {
-    if (mod.canDrawOverlays() && !mod.isShowing()) await mod.show();
-  } catch {
-    // 恢复失败不是错误：权限可能被撤销了，设置页会显示真实状态
-  }
-}
-
-/** 直接跳到授权页（设置页里"去打开"用的） */
-export async function openOverlayPermission(): Promise<boolean> {
+/** 直接跳到授权页（设置页里拨开关时用） */
+export async function requestOverlayPermission(): Promise<boolean> {
   const mod = native();
   if (!mod) return false;
   try {
@@ -164,10 +125,38 @@ export async function openOverlayPermission(): Promise<boolean> {
   }
 }
 
-/** 深链地址。原生侧那份在 `OverlayService.CAPTURE_URL`，两处必须一致。 */
+/** 专注页在退后台时调：把浮条画出来。返回有没有真的画出来 */
+export async function showFocusBar(state: {
+  /** 虚拟起点：跑着的时候 = now - 已跑时长（原生据此每秒现算） */
+  startedAtMs: number;
+  /** 暂停前已攒的时长（ms）；跑着的时候传 0 */
+  accumulatedMs: number;
+  paused: boolean;
+}): Promise<boolean> {
+  const mod = native();
+  if (!mod) return false;
+  try {
+    return await mod.showFocusBar(state.startedAtMs, state.accumulatedMs, state.paused);
+  } catch {
+    return false;
+  }
+}
+
+/** 回前台 / 专注结束时调：把浮条收起来。幂等，重复调无副作用 */
+export async function hideFocusBar(): Promise<void> {
+  const mod = native();
+  if (!mod) return;
+  try {
+    await mod.hideFocusBar();
+  } catch {
+    // 收不起来就算了：回前台时它挡着的是自己的 App，下一轮 focus 会重画
+  }
+}
+
+/** 深链地址。原生侧那份在 `FocusBar.FOCUS_URL`，两处必须一致。 */
 export const OVERLAY_CAPTURE_URL = 'aischedule://capture';
 
-/** 给"点通知/点气泡之后到底去了哪"兜底：解析出问题就直接开记录页 */
+/** 给"点通知/点浮条之后到底去了哪"兜底：解析出问题就直接开记录页 */
 export async function openCaptureDeepLink(): Promise<boolean> {
   try {
     const supported = await Linking.canOpenURL(OVERLAY_CAPTURE_URL);
@@ -180,15 +169,14 @@ export async function openCaptureDeepLink(): Promise<boolean> {
 }
 
 /*
- * ---------------- 通知栏入口（2026-10-11 第二批） ----------------
+ * ---------------- 通知栏入口（2026-10-11 第二批，2026-10-13 起是唯一快速记录入口） ----------------
  *
- * 与悬浮球的关系：**并存一轮**（方案 docs/入口层方案-2026-10-11.md §3）。
- * 悬浮球是真机刚修好的形态，没有回退方案的替换不划算 —— 真机验过通知栏
- * 方案再决定删谁。所以这里是第二组独立函数，不碰上面任何一颗函数。
+ * 悬浮球删除后它成为"快速记录"的唯一系统级形态：通知栏里常驻一条，
+ * 点一下弹 CaptureDialogActivity，记完走 aischedule://capture?text=&auto=1 落库。
  *
- * 与悬浮球的授权差异：通知栏入口**不需要**"显示在其他应用上层"那个授权
- * （它不画窗口），要的是**通知权限** —— 点通知拉起的 Activity 是普通
- * Activity，Android 10+ 的后台启动限制由"用户点了通知"这件事豁免。
+ * 授权门与浮条不同：它**不需要**"显示在其他应用上层"（不画窗口），
+ * 要的是**通知权限** —— 点通知拉起的 Activity 是普通 Activity，
+ * Android 10+ 的后台启动限制由"用户点了通知"这件事豁免。
  */
 
 export type NotifyEntryStatus =
@@ -276,9 +264,10 @@ export async function disableNotifyEntry(): Promise<NotifyEntrySupport> {
 }
 
 /**
- * 启动时按用户上次的选择恢复通知（与 restoreOverlayIfEnabled 同一个理由：
- * 开一次就一直在，不该因为 App 重启就得再去设置页点一次）。
- * 手机重启 / 强制停止后系统会撤掉这条通知，下次打开 App 时它自己回来。
+ * 启动时按用户上次的选择恢复通知（手机重启 / 强制停止后系统会撤掉它）。
+ *
+ * 为什么需要它：用户开过一次之后，不该因为 App 重启就得再去设置页点一次。
+ * 开一次就一直在，才叫简单。用户没开过（`enabled === false`）时什么都不做。
  */
 export async function restoreNotifyEntryIfEnabled(enabled: boolean): Promise<void> {
   if (!enabled) return;

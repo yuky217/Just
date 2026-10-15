@@ -3,7 +3,8 @@ import { createId } from '@/utils/id';
 
 import type { BaseEntity } from './base';
 import type { Checkin } from './checkins';
-import type { Container, Mark } from './container';
+import type { CalendarKind, Container, Mark } from './container';
+import type { PeriodLog } from './period';
 import { sanitizeSessions, type Course, type CourseSession, type Term } from './course';
 import { ContainerStatus } from './enums';
 import {
@@ -22,6 +23,7 @@ import { defaultReminderMinutes } from './reminder';
 import type { FocusSession } from './focus';
 import type { Idea } from './idea';
 import type { RepeatRule, Task, TaskTime } from './task';
+import { nextLunarGregorian, parseLunarMd, resolveTermToGregorian } from './lunar';
 import { DEFAULT_PERIODS, sanitizePeriods, type ClassPeriod } from './timetable';
 
 /**
@@ -197,20 +199,51 @@ export interface CreateMarkInput {
   title: string;
   /** 默认倒数（还剩几天） */
   kind?: MarkKind;
-  /** YYYY-MM-DD */
-  date: string;
+  /** YYYY-MM-DD。公历标记必填；农历 / 节气标记不传时由历法现算一个公历锚点 */
+  date?: string;
   /** 每年重复：生日、纪念日这类 */
   repeatYearly?: boolean;
+  /** 历法，默认公历 */
+  calendar?: CalendarKind;
+  /** 农历月日串（'8-15' / 'leap2-5'），calendar==='lunar' 时必填 */
+  lunarMd?: string | null;
+  /** 节气名（'清明'），calendar==='term' 时必填 */
+  term?: string | null;
 }
 
-/** 纪念日（主文档 5.3 的"标记"）：独立于任务，不参与排程 */
+/**
+ * 纪念日（主文档 5.3 的"标记"）：独立于任务，不参与排程。
+ *
+ * 农历 / 节气标记**也存一个公历锚点**：正数日拿它算"已经多少天"，
+ * 倒数日则忽略它、由 `nextMarkDate` 按历法往前滚到下一次函数。
+ * 锚点取"创建那年（含）往后第一个出现的公历日" —— 创建时算一次，
+ * 之后每次显示都重新按历法滚，所以不依赖这个锚点保持新鲜。
+ */
 export function createMark(input: CreateMarkInput): Mark {
+  const calendar = input.calendar ?? 'solar';
+  let date = input.date;
+
+  if (!date) {
+    if (calendar === 'lunar' && input.lunarMd) {
+      const md = parseLunarMd(input.lunarMd);
+      if (!md) throw new Error(`createMark: invalid lunarMd ${input.lunarMd}`);
+      date = nextLunarGregorian(md.leap, md.month, md.day, new Date().getFullYear());
+    } else if (calendar === 'term' && input.term) {
+      date = resolveTermToGregorian(input.term, new Date().getFullYear());
+    } else {
+      throw new Error('createMark: date is required for solar marks');
+    }
+  }
+
   return {
     ...createBase('mark'),
     kind: input.kind ?? MarkKind.Countdown,
     title: input.title.trim(),
-    date: input.date,
+    date,
     repeatYearly: input.repeatYearly ?? false,
+    calendar,
+    lunarMd: input.lunarMd ?? null,
+    term: input.term ?? null,
   };
 }
 
@@ -243,6 +276,20 @@ export function createCheckin(
     taskId,
     dayKey: toDayKey(day),
     minuteOfDay: minuteOfDay ?? day.getHours() * 60 + day.getMinutes(),
+    note: null,
+  };
+}
+
+/**
+ * 记一次经期来潮。
+ * 由界面层决定"这次持续几天"（默认取设置里的经期长度），工厂本身不读设置 ——
+ * 保持纯函数、不引入对 settings-store 的依赖。
+ */
+export function createPeriodLog(startDate: Date, length: number): PeriodLog {
+  return {
+    ...createBase('period'),
+    startDayKey: toDayKey(startDate),
+    length: Math.max(1, length),
     note: null,
   };
 }

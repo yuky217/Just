@@ -1,0 +1,17 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+group = 'com.aiyuexi.aischedule.speech'
+version = '1.0.0'
+android {
+  namespace "com.aiyuexi.aischedule.speech"
+  defaultConfig {
+    versionCode 1
+    versionName "1.0.0"
+  }
+  lint {
+    // 与 overlay 模块同一口径：自用模块，lint 不该挡住打包
+    abortOnError = false
+  }
+}

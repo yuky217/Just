@@ -5,7 +5,10 @@ import type { Task } from '@/domain/task';
 
 import {
   parseReminderResponse,
+  REMINDER_CHANNEL_IMPORTANT,
+  REMINDER_CHANNEL_NORMAL,
   scheduleTaskReminder,
+  syncEventReminders,
   syncRepeatingTaskReminders,
   takeLastReminderResponse,
 } from './notifications';
@@ -21,7 +24,10 @@ import {
 
 /** 假的通知系统：记下排了什么、谁还在 */
 const fake = vi.hoisted(() => ({
-  store: new Map<string, { title: string; body: string; data: Record<string, unknown> }>(),
+  store: new Map<
+    string,
+    { title: string; body: string; data: Record<string, unknown>; channelId?: string }
+  >(),
   seq: 0,
   permission: { granted: true } as { granted: boolean },
   /** 原生侧那份「上一次被点掉的通知响应」 */
@@ -45,17 +51,23 @@ vi.mock('react-native', () => ({
 }));
 
 vi.mock('expo-notifications', () => ({
-  AndroidImportance: { DEFAULT: 3 },
-  SchedulableTriggerInputTypes: { DATE: 'date', TIME_INTERVAL: 'timeInterval' },
+  AndroidImportance: { DEFAULT: 3, HIGH: 6 },
+  SchedulableTriggerInputTypes: { DATE: 'date', TIME_INTERVAL: 'timeInterval', DAILY: 'daily' },
   setNotificationHandler: () => {},
   setNotificationChannelAsync: async () => {},
   getPermissionsAsync: async () => fake.permission,
   requestPermissionsAsync: async () => fake.permission,
   scheduleNotificationAsync: async (req: {
     content: { title: string; body: string; data: Record<string, unknown> };
+    trigger?: { channelId?: string };
   }) => {
     const id = `n${(fake.seq += 1)}`;
-    fake.store.set(id, { title: req.content.title, body: req.content.body, data: req.content.data });
+    fake.store.set(id, {
+      title: req.content.title,
+      body: req.content.body,
+      data: req.content.data,
+      channelId: req.trigger?.channelId,
+    });
     return id;
   },
   getAllScheduledNotificationsAsync: async () =>
@@ -81,6 +93,18 @@ vi.mock('expo-notifications', () => ({
     fake.lastResponse = null;
     fake.clearCount += 1;
   },
+}));
+
+// 原生提醒通道在 node 测试环境里没有对应的原生模块（expo-modules-core 顶层
+// 会读 __DEV__ 直接崩）。把它桩成"不可用"，调度逻辑自然退回 expo 那条路 ——
+// 这条路的排/撤行为才是本测试要钉死的东西。
+vi.mock('./native-reminders', () => ({
+  nativeReminderAvailable: () => false,
+  nativeReminderId: (taskId: string, fireAt: Date) => `${taskId}|${fireAt.getTime()}`,
+  scheduleNativeReminder: async () => false,
+  cancelNativeReminder: async () => {},
+  cancelNativeTaskReminders: async () => {},
+  cancelAllNativeReminders: async () => {},
 }));
 
 /** 周三中午 —— 与 reminder.test.ts 用同一时刻，两边算出的期能对得上 */
@@ -141,6 +165,62 @@ describe('scheduleTaskReminder', () => {
     const ids = await scheduleTaskReminder(task({ id: 'c' }));
     expect(ids).toEqual([]);
     expect(fake.store.size).toBe(0);
+  });
+});
+
+describe('scheduleTaskReminder 铃声渠道两档', () => {
+  const channelOf = (taskId: string) =>
+    [...fake.store.values()].find((item) => item.data.taskId === taskId)?.channelId;
+
+  it('普通日程 → 普通渠道', async () => {
+    await scheduleTaskReminder(task({ id: 'nrm', reminderMinutesBefore: 10 }));
+    expect(channelOf('nrm')).toBe(REMINDER_CHANNEL_NORMAL);
+  });
+
+  it('出发类（标题含准备动作词，defaultReminderMinutes 判 60）→ 重要渠道', async () => {
+    await scheduleTaskReminder(
+      task({ id: 'dep', reminderMinutesBefore: 10, title: '19:00 出发去机场' }),
+    );
+    expect(channelOf('dep')).toBe(REMINDER_CHANNEL_IMPORTANT);
+  });
+
+  it('临近的截止（24h 内）→ 重要渠道', async () => {
+    const soon = new Date(NOW.getTime() + 2 * 3600 * 1000);
+    await scheduleTaskReminder(
+      task({
+        id: 'dl',
+        reminderMinutesBefore: 0,
+        time: { attribute: TimeAttribute.Deadline, startAt: null, endAt: null, dueAt: soon.toISOString() },
+      }),
+    );
+    expect(channelOf('dl')).toBe(REMINDER_CHANNEL_IMPORTANT);
+  });
+
+  it('遥远的截止（>24h）→ 普通渠道（远未来的截止不该现在就响得急）', async () => {
+    const far = new Date(NOW.getTime() + 10 * 24 * 3600 * 1000);
+    await scheduleTaskReminder(
+      task({
+        id: 'fardl',
+        reminderMinutesBefore: 0,
+        time: { attribute: TimeAttribute.Deadline, startAt: null, endAt: null, dueAt: far.toISOString() },
+      }),
+    );
+    expect(channelOf('fardl')).toBe(REMINDER_CHANNEL_NORMAL);
+  });
+});
+
+describe('syncEventReminders 铃声渠道', () => {
+  it('考试 → 重要渠道', async () => {
+    const event = {
+      id: 'e1',
+      title: '高数期中',
+      startAt: new Date(NOW.getTime() + 2 * 24 * 3600 * 1000).toISOString(),
+      deletedAt: null,
+    } as import('@/domain/event').CalEvent;
+
+    const count = await syncEventReminders([event]);
+    expect(count).toBe(1);
+    expect([...fake.store.values()][0]?.channelId).toBe(REMINDER_CHANNEL_IMPORTANT);
   });
 });
 

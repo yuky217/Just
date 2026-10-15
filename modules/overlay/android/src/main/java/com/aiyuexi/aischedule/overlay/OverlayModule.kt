@@ -5,25 +5,25 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
-import androidx.core.content.ContextCompat
 import expo.modules.kotlin.exception.Exceptions
 import expo.modules.kotlin.functions.Queues
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
 /**
- * 悬浮窗（记录入口）—— Android 专属能力。
+ * 入口层在 Android 上的原生能力（2026-10-13 起只剩两件）。
+ *
+ * 历史：先是悬浮球（自写 Service + WindowManager 画一个气泡），
+ * 2026-10-13 用户拍板「悬浮球快速记改成通知栏」—— 球整套删除
+ * （OverlayService.kt 已删），这里换成通知栏常驻入口；
+ * 同一天又加了「专注时间浮条」，于是「显示在其他应用上层」这个授权
+ * 从"为球服务"变成"为专注浮条服务"，函数名保留 canDrawOverlays。
  *
  * 为什么只有 Android：iOS 没有公开 API 允许应用在自己的窗口之外绘制，
  * 所以那边这个模块连编都不编（见 expo-module.config.json 的 platforms）。
  *
- * 为什么自己写而不装现成的库：候选都试过，两条路都堵着 ——
- * 一条用的是普通后台服务（Android 8 以后 App 一退后台气泡就被系统收走），
- * 另一条的 gradle 依赖的是 `com.facebook.react:react-native`，那个制品在
- * Maven 上只发到 0.71，跟本项目的 0.86 并排放会撞类。这里只有五个方法，
- * 自己写反而更短、更可控。
- *
- * 边界：本模块只管"球在不在"。点球之后去哪，由 Service 用 deep link 交给应用。
+ * 边界：本模块只管"东西在不在、画不画得出来"。点完之后去哪，
+ * 由深链交给应用（aischedule://capture / aischedule://focus）。
  */
 class OverlayModule : Module() {
   private val context: Context
@@ -33,9 +33,11 @@ class OverlayModule : Module() {
     // JS 侧用 requireOptionalNativeModule('Overlay') 找这个名字
     Name("Overlay")
 
-    // 模块能加载就说明是 Android 独立版。Expo Go / 网页端根本找不到这个模块
-    Function("isSupported") { true }
-
+    /*
+     * 「显示在其他应用上层」授权。通知栏入口不要它（不画窗口），
+     * 专注时间浮条要。跳出去之后用户授权完回来，由 JS 侧闭环
+     * （设置页 AppState 回前台重探状态）。
+     */
     Function("canDrawOverlays") {
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
         Settings.canDrawOverlays(context)
@@ -44,9 +46,6 @@ class OverlayModule : Module() {
       }
     }
 
-    Function("isShowing") { OverlayService.isRunning }
-
-    // 跳系统设置页让用户授权。回来之后还得再调一次 show()，由 JS 侧负责
     AsyncFunction("requestPermission") {
       val activity = appContext.currentActivity ?: throw Exceptions.MissingActivity()
       activity.startActivity(
@@ -58,19 +57,7 @@ class OverlayModule : Module() {
       true
     }.runOnQueue(Queues.MAIN)
 
-    AsyncFunction("show") {
-      ContextCompat.startForegroundService(context, serviceIntent(OverlayService.ACTION_SHOW))
-      true
-    }.runOnQueue(Queues.MAIN)
-
-    // 用 stopService 而不是给服务发"隐藏"指令：
-    // 服务结束会走 onDestroy，那里负责把 View 摘下来，不用额外同步
-    AsyncFunction("hide") {
-      context.stopService(serviceIntent(OverlayService.ACTION_HIDE))
-      true
-    }.runOnQueue(Queues.MAIN)
-
-    // ---------------- 通知栏入口（2026-10-11 第二批，与悬浮球并存一轮） ----------------
+    // ---------------- 通知栏入口（2026-10-11 第二批，2026-10-13 成为唯一快速记录入口） ----------------
 
     Function("isEntryShowing") { NotificationEntry.isShowing(context) }
 
@@ -84,8 +71,24 @@ class OverlayModule : Module() {
       NotificationEntry.hide(context)
       true
     }.runOnQueue(Queues.MAIN)
-  }
 
-  private fun serviceIntent(action: String): Intent =
-    Intent(context, OverlayService::class.java).setAction(action)
+    // ---------------- 专注时间浮条（2026-10-13） ----------------
+
+    Function("isFocusBarShowing") { FocusBar.isShowing() }
+
+    /*
+     * startedAtMs / accumulatedMs / paused 三者描述"现在这一刻的专注状态"：
+     * 跑着 → startedAtMs = 虚拟起点（now - 已跑时长），accumulatedMs = 0；
+     * 暂停 → accumulatedMs = 已攒的时长，paused = true（startedAtMs 忽略）。
+     * 原生侧每秒用它们现算，不需要 JS 每秒同步一次。
+     */
+    AsyncFunction("showFocusBar") { startedAtMs: Double, accumulatedMs: Double, paused: Boolean ->
+      FocusBar.show(context, startedAtMs.toLong(), accumulatedMs.toLong(), paused)
+    }.runOnQueue(Queues.MAIN)
+
+    AsyncFunction("hideFocusBar") {
+      FocusBar.hide()
+      true
+    }.runOnQueue(Queues.MAIN)
+  }
 }

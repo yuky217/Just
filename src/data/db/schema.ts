@@ -10,7 +10,7 @@
  * **顺序不能换**，原因见 INDEXES 上的注释（换过，代价是升级后 App 直接起不来）。
  */
 
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 13;
 
 /** 表名集中放这里，避免各处硬编码字符串写错 */
 export const TABLES = {
@@ -24,6 +24,7 @@ export const TABLES = {
   courses: 'courses',
   terms: 'terms',
   events: 'events',
+  periodLogs: 'period_logs',
   meta: 'app_meta',
 } as const;
 
@@ -65,6 +66,7 @@ CREATE TABLE IF NOT EXISTS ${TABLES.tasks} (
   title             TEXT NOT NULL,
   note              TEXT,
   location          TEXT,
+  url               TEXT,
   kind              TEXT NOT NULL,
   status            TEXT NOT NULL,
   time_attribute    TEXT NOT NULL,
@@ -135,6 +137,12 @@ CREATE TABLE IF NOT EXISTS ${TABLES.marks} (
   title         TEXT NOT NULL,
   date          TEXT NOT NULL,
   repeat_yearly INTEGER NOT NULL DEFAULT 0,
+  /** 历法：solar / lunar / term。默认 solar，老库靠 MIGRATIONS 12 补列 */
+  calendar      TEXT NOT NULL DEFAULT 'solar',
+  /** 农历月日：'8-15' / 'leap2-5'，仅农历标记有 */
+  lunar_md      TEXT,
+  /** 节气名，仅节气标记有 */
+  term          TEXT,
   ${COMMON_COLUMNS}
 );
 
@@ -213,6 +221,19 @@ CREATE TABLE IF NOT EXISTS ${TABLES.terms} (
   ${COMMON_COLUMNS}
 );
 
+-- 经期记录：每次来潮记一行（start_date = 来潮当天，length = 持续天数）。
+-- 与任务 / 打卡分开存：它既不是"要做的事"也不是"某件事重复做"，
+-- 而是周期性生理现象，预测只靠"最近一次 + 周期长度"推导，简单稳定。
+-- 不进 marks/events：它不是纪念日也不是固定日程，放进那两套口径反而污染
+-- "倒数几天""到点提醒"的语义。关掉功能时这一行数据**不删**（见 domain/features.ts）。
+CREATE TABLE IF NOT EXISTS ${TABLES.periodLogs} (
+  id          TEXT PRIMARY KEY NOT NULL,
+  start_date  TEXT NOT NULL,
+  length      INTEGER NOT NULL DEFAULT 5,
+  note        TEXT,
+  ${COMMON_COLUMNS}
+);
+
 `;
 
 /**
@@ -238,6 +259,7 @@ export const INDEXES: readonly string[] = [
   `CREATE INDEX IF NOT EXISTS idx_checkins_task     ON ${TABLES.checkins}(task_id, day_key, deleted_at)`,
   `CREATE INDEX IF NOT EXISTS idx_courses_title     ON ${TABLES.courses}(title, deleted_at)`,
   `CREATE INDEX IF NOT EXISTS idx_events_start      ON ${TABLES.events}(start_at, deleted_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_period_start      ON ${TABLES.periodLogs}(start_date, deleted_at)`,
 ];
 
 /**
@@ -326,4 +348,33 @@ export const MIGRATIONS: Readonly<Record<number, readonly string[]>> = {
    * **可空**，老数据不用回填：以前拆出来的步骤读出来跟以前一样（只是没有批次可撤）。
    */
   10: [`ALTER TABLE ${TABLES.tasks} ADD COLUMN breakdown_batch_id TEXT`],
+  /**
+   * v11 = period_logs 表（经期记录）。
+   *
+   * 新表由 DDL 的 `CREATE TABLE IF NOT EXISTS` 建出来，老库升级不需要任何 ALTER。
+   * 这里留空数组只是为了让版本号照常推进（bootstrap 从当前版本 +1 跑到 SCHEMA_VERSION）。
+   */
+  11: [],
+  /**
+   * v12 = marks 加 calendar / lunar_md / term（农历 / 节气纪念日）。
+   *
+   * 只加列，向后兼容：老库升级走这里，全新安装走上面的 DDL（两者列名/默认值一致）。
+   * `calendar` 带 NOT NULL DEFAULT 'solar'，老行自动归公历，不用回填；
+   * `lunar_md` / `term` 可空，没录过农历/节气的标记读出来跟以前完全一样。
+   */
+  12: [
+    `ALTER TABLE ${TABLES.marks} ADD COLUMN calendar TEXT NOT NULL DEFAULT 'solar'`,
+    `ALTER TABLE ${TABLES.marks} ADD COLUMN lunar_md TEXT`,
+    `ALTER TABLE ${TABLES.marks} ADD COLUMN term TEXT`,
+  ],
+  /**
+   * v13 = tasks 加 url（链接）。
+   *
+   * 它跟 location 一样是任务自己的一行属性，永远随任务一起读出来，加列而不是开新表。
+   * **可空**，老数据不用回填 —— 没填过链接的任务读出来跟以前完全一样。
+   *
+   * 存的是用户填的原文（可能没有 `https://`）：补协议头是"要打开时"的事，
+   * 交给 `normalizeUrl` 收口，不在这里改写用户写的东西。
+   */
+  13: [`ALTER TABLE ${TABLES.tasks} ADD COLUMN url TEXT`],
 };

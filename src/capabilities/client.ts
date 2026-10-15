@@ -1,5 +1,6 @@
 import { breakdownSpec, type BreakdownSuggestion } from './breakdown';
 import { desensitize } from './desensitize';
+import { describeCandidates, scheduleSpec, type ScheduleSuggestion } from './schedule';
 import { understandSpec } from './understand';
 import {
   AiCapability,
@@ -9,6 +10,13 @@ import {
   type CapabilitySpec,
 } from './types';
 import type { ParsedSchedule } from '@/domain/parse-schedule';
+import {
+  resolveScope,
+  sanitizePlans,
+  type ScheduleCandidate,
+  type SchedulePlan,
+  type ScheduleScope,
+} from '@/domain/schedule-suggest';
 
 /**
  * 能力层调用入口。
@@ -137,10 +145,46 @@ export async function suggestBreakdown(
   return res.data;
 }
 
-/** 已经接了真实实现的能力。其余四项仍是"有开关、没接线"（返回 null，走本地降级） */
+/**
+ * 「让模型把这批没排的事安排进未来一周」。
+ *
+ * 与 `suggestBreakdown` 一样**抛错**：排期是用户主动点的动作，点了一下没反应
+ * 比"排不出来"糟糕得多。返回的是**已过 `sanitizePlans` 四道闸**的建议，
+ * 但仍是建议 —— 落库由界面在用户确认后逐条走 `scheduleTask`。
+ */
+export async function suggestSchedule(
+  gate: CapabilityGate,
+  options: {
+    candidates: readonly ScheduleCandidate[];
+    now?: Date;
+    /** 排期条件（未来几天 / 每天哪个时段）。不给就是默认值 —— 不调的人零操作 */
+    scope?: ScheduleScope;
+  },
+): Promise<SchedulePlan[]> {
+  const now = options.now ?? new Date();
+  const candidates = options.candidates;
+  const scope = resolveScope(options.scope);
+  if (!candidates.length) throw new AiCallError('没有需要安排的任务');
+
+  const res = await callCapability<ScheduleSuggestion>(gate, {
+    capability: AiCapability.Schedule,
+    text: describeCandidates(candidates, now, scope),
+    context: { scope },
+  });
+
+  const plans = sanitizePlans(res.data?.plans, candidates, now, scope);
+  if (!plans.length) {
+    // 与拆解同一条：返回空数组会让界面摊一张空面板，用户以为"点了没反应"
+    throw new AiCallError('模型没给出可用的安排，自己定也一样');
+  }
+  return plans;
+}
+
+/** 已经接了真实实现的能力。其余两项仍是"有开关、没接线"（返回 null，走本地降级） */
 const CAPABILITY_SPECS: Partial<Record<AiCapability, CapabilitySpec<unknown>>> = {
   [AiCapability.Understand]: understandSpec,
   [AiCapability.Breakdown]: breakdownSpec,
+  [AiCapability.Schedule]: scheduleSpec,
 };
 
 /** 默认超时。手机上等 15 秒已经是耐心的上限，再久不如退回本地识别 */
@@ -175,7 +219,7 @@ export async function callCapability<T>(
 
   const now = new Date();
   const raw = await chatCompletion(gate.config, [
-    { role: 'system', content: spec.system(now) },
+    { role: 'system', content: spec.system(now, request.context) },
     { role: 'user', content: spec.user(sentText, request.context) },
   ]);
 
